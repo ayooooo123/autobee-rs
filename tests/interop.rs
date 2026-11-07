@@ -499,6 +499,24 @@ fn normalise_rows(rows: &Value) -> Vec<(String, String)> {
     rows
 }
 
+fn converged_views(js: &Value, rust: &Value, expected: &[(&str, &str)]) -> bool {
+    let rows = normalise_rows(&rust["view"]);
+    rows == normalise_rows(&js["view"])
+        && expected
+            .iter()
+            .all(|(key, value)| rows.contains(&(hex(key.as_bytes()), hex(value.as_bytes()))))
+}
+
+#[test]
+fn equal_stale_views_have_not_converged() {
+    let empty = json!({"view": []});
+    let current = json!({"view": [{"key": hex(b"key"), "value": hex(b"value")}]});
+    let expected = &[("key", "value")];
+    assert!(!converged_views(&empty, &empty, expected));
+    assert!(!converged_views(&current, &empty, expected));
+    assert!(converged_views(&current, &current, expected));
+}
+
 /// One round of hint exchange between the JS owner and the Rust writer.
 async fn poke(js: &mut JsPeer, rust: &RustPeer, js_local: Key) {
     let rust_state = rust.state().await;
@@ -545,7 +563,13 @@ async fn poke_js_writer(js: &mut JsPeer, rust: &RustPeer, js_local: Key) {
 
 /// Exchanges hints in both directions until the two peers agree on the system
 /// info, the view rows and every oplog either side knows about.
-async fn converge(js: &mut JsPeer, rust: &RustPeer, js_local: Key, round: &str) -> (Value, Value) {
+async fn converge(
+    js: &mut JsPeer,
+    rust: &RustPeer,
+    js_local: Key,
+    round: &str,
+    expected: &[(&str, &str)],
+) -> (Value, Value) {
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let js_state = js.state().await;
@@ -575,7 +599,7 @@ async fn converge(js: &mut JsPeer, rust: &RustPeer, js_local: Key, round: &str) 
         let rust_state = rust.state().await;
 
         let same_info = normalise_info(&js_state) == normalise_info(&rust_state);
-        let same_view = normalise_rows(&js_state["view"]) == normalise_rows(&rust_state["view"]);
+        let same_view = converged_views(&js_state, &rust_state, expected);
 
         let mut same_blocks = true;
         if same_info && same_view {
@@ -636,7 +660,14 @@ async fn js_owner_and_rust_writer_converge_restart_and_swap() {
     rust.append(&json!({ "type": "put", "key": "rust/1", "value": "from-rust" }))
         .await;
 
-    let (js_state, rust_state) = converge(&mut js, &rust, js_local, "owner-grant").await;
+    let (js_state, rust_state) = converge(
+        &mut js,
+        &rust,
+        js_local,
+        "owner-grant",
+        &[("js/1", "from-js"), ("rust/1", "from-rust")],
+    )
+    .await;
 
     assert_eq!(
         normalise_info(&js_state),
@@ -697,7 +728,14 @@ async fn js_owner_and_rust_writer_converge_restart_and_swap() {
 
     rust.append(&json!({ "type": "put", "key": "rust/2", "value": "after-restart" }))
         .await;
-    let (js_state, rust_state) = converge(&mut js, &rust, js_local, "restart").await;
+    let (js_state, rust_state) = converge(
+        &mut js,
+        &rust,
+        js_local,
+        "restart",
+        &[("rust/2", "after-restart")],
+    )
+    .await;
     assert_eq!(
         normalise_info(&js_state),
         normalise_info(&rust_state),
@@ -802,7 +840,11 @@ async fn converge_js_writer(js: &mut JsPeer, rust: &RustPeer, js_local: Key) -> 
         let js_state = js.state().await;
         let rust_state = rust.state().await;
         if normalise_info(&js_state) == normalise_info(&rust_state)
-            && normalise_rows(&js_state["view"]) == normalise_rows(&rust_state["view"])
+            && converged_views(
+                &js_state,
+                &rust_state,
+                &[("owner/1", "from-owner"), ("writer/1", "from-writer")],
+            )
             && js.blocks(&js_local).await == rust.blocks(js_local).await
         {
             return (js_state, rust_state);

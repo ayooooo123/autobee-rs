@@ -130,3 +130,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test                          # no node needed
 cargo test -- --include-ignored     # adds the two live JS interop tests
 ```
+
+The owner/writer convergence barrier requires each round's appended view rows, not just equal
+peer snapshots: both peers may briefly agree on the old state while an append waits on its links.
