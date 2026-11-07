@@ -121,9 +121,70 @@ fn every_recorded_hash_transition_matches() {
     }
 }
 
-async fn replay_peer(name: &str, peer: &str, writer: [u8; 32], events: &[&Value]) {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Corestore::open_with_primary_key(dir.path(), [peer.as_bytes()[0]; 32]).unwrap();
+fn replay_store(dir: &Path, peer: &str) -> Corestore {
+    Corestore::open_with_primary_key(dir, [peer.as_bytes()[0]; 32]).unwrap()
+}
+
+/// Copies a core another peer owns in the recording into `store` by replicating
+/// from a store opened with that peer's primary key and the same core name.
+async fn seed_core(
+    store: &Corestore,
+    root: &Path,
+    owner: &str,
+    writer: &[u8; 32],
+    blocks: &[String],
+) {
+    let dir = root.join(format!("seed-{owner}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let seeds = replay_store(&dir, owner);
+    let id = hypercore_id_encoding::encode(writer);
+    let mut opts = GetOptions::name(format!("autobee/{id}/view/system"));
+    opts.manifest_version = Some(3);
+    let core = seeds.get(opts).await.unwrap();
+    let blocks: Vec<Vec<u8>> = blocks.iter().map(|block| bytes(block)).collect();
+    let slices: Vec<&[u8]> = blocks.iter().map(|block| block.as_slice()).collect();
+    core.append(&slices).await.unwrap();
+
+    let ((ar, aw), (br, bw)) = protomux::memory::duplex(64);
+    let handshake = Some([11u8; 64]);
+    seeds.replicate(&protomux::Mux::new(
+        ar,
+        aw,
+        protomux::StreamInfo {
+            is_initiator: true,
+            handshake_hash: handshake,
+            remote_public_key: None,
+        },
+    ));
+    store.replicate(&protomux::Mux::new(
+        br,
+        bw,
+        protomux::StreamInfo {
+            is_initiator: false,
+            handshake_hash: handshake,
+            remote_public_key: None,
+        },
+    ));
+    let reader = store.get(GetOptions::key(*core.key())).await.unwrap();
+    let complete = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        reader.download(0, Some(blocks.len() as u64), false),
+    )
+    .await
+    .expect("the seeded download settles")
+    .unwrap();
+    assert!(complete);
+    core.close();
+    reader.close();
+}
+
+async fn replay_peer(
+    store: &Corestore,
+    name: &str,
+    peer: &str,
+    writer: [u8; 32],
+    events: &[&Value],
+) {
     let id = hypercore_id_encoding::encode(&writer);
     let mut system_opts = GetOptions::name(format!("autobee/{id}/view/system"));
     system_opts.manifest_version = Some(3);
@@ -141,12 +202,18 @@ async fn replay_peer(name: &str, peer: &str, writer: [u8; 32], events: &[&Value]
         &key(&events[0]["view"]["key"]),
         "{name}/{peer} view core key"
     );
-    let bee = Bee::from_session(&store, core.clone()).await.unwrap();
+    let bee = Bee::from_session(store, core.clone()).await.unwrap();
     let mut system = SystemBee::new(bee);
     for (i, event) in events.iter().enumerate() {
+        let pre = head(&event["preHead"]);
+        // A recorded undo, or a boot onto another peer's core, leaves the head
+        // where the trace says the flush started.
+        if system.bee.head().as_ref() != Some(&pre) {
+            system.undo(pre).await.unwrap();
+        }
         assert_eq!(
             system.bee.head().unwrap(),
-            head(&event["preHead"]),
+            pre,
             "{name}/{peer} pre-head {i}"
         );
         let nodes: Vec<_> = event["batch"]
@@ -281,7 +348,16 @@ async fn replay_single_core_system_flushes() {
                 .filter(|f| f["peer"] == *peer)
                 .collect();
             if is_single_core_history(&events) {
-                replay_peer(&name, peer, key(&trace["peers"][peer]["writer"]), &events).await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = replay_store(dir.path(), peer);
+                replay_peer(
+                    &store,
+                    &name,
+                    peer,
+                    key(&trace["peers"][peer]["writer"]),
+                    &events,
+                )
+                .await;
                 count += 1;
             }
         }
@@ -289,22 +365,77 @@ async fn replay_single_core_system_flushes() {
     assert!(count > 0);
 }
 
+/// Peers whose system tree was undone or booted onto another peer's core: the
+/// undo target is the flush's recorded pre-head, and a foreign pre-head is
+/// seeded from the blocks its owner recorded.
 #[tokio::test]
-#[ignore = "needs hyperbee-rs move/checkout(key)"]
-async fn replay_multicore_and_undo_traces() {
+async fn replay_undo_and_cross_core_system_flushes() {
+    let mut count = 0;
     for (name, trace) in traces() {
-        for peer in trace["peers"].as_object().unwrap().keys() {
+        let peers = trace["peers"].as_object().unwrap();
+        for peer in peers.keys() {
             let events: Vec<_> = trace["flushes"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .filter(|f| f["peer"] == *peer)
                 .collect();
-            if !events.is_empty() && !is_single_core_history(&events) {
-                replay_peer(&name, peer, key(&trace["peers"][peer]["writer"]), &events).await;
+            if events.is_empty() || is_single_core_history(&events) {
+                continue;
             }
+            let dir = tempfile::tempdir().unwrap();
+            let store = replay_store(dir.path(), peer);
+            let local = key(&events[0]["system"]["key"]);
+            let mut seeded: Vec<[u8; 32]> = Vec::new();
+            for event in &events {
+                let pre = head(&event["preHead"]);
+                if pre.key == local || seeded.contains(&pre.key) {
+                    continue;
+                }
+                let Some((owner, blocks)) = peers.iter().find_map(|(owner, _)| {
+                    let owner_events: Vec<_> = trace["flushes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|f| f["peer"] == *owner)
+                        .collect();
+                    if !owner_events
+                        .iter()
+                        .any(|e| key(&e["system"]["key"]) == pre.key)
+                    {
+                        return None;
+                    }
+                    owner_events
+                        .iter()
+                        .rev()
+                        .find(|e| {
+                            e["system"]["blocks"].as_array().unwrap().len() == pre.length as usize
+                        })
+                        .map(|e| (owner, e["system"]["blocks"].clone()))
+                }) else {
+                    panic!("{name}: {peer} pre-head on a core nobody recorded");
+                };
+                let blocks: Vec<String> = blocks
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| block.as_str().unwrap().to_owned())
+                    .collect();
+                seed_core(
+                    &store,
+                    dir.path(),
+                    owner,
+                    &key(&peers[owner]["writer"]),
+                    &blocks,
+                )
+                .await;
+                seeded.push(pre.key);
+            }
+            replay_peer(&store, &name, peer, key(&peers[peer]["writer"]), &events).await;
+            count += 1;
         }
     }
+    assert!(count > 0);
 }
 
 #[tokio::test]
