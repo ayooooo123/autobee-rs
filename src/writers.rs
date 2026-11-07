@@ -82,6 +82,8 @@ pub struct ActiveWriters {
     pub local: Key,
     /// `writers.writable`: the local writer is granted and not removed.
     pub writable: bool,
+    /// `writable`, mirrored for synchronous readers (JS reads `base.writable` without awaiting).
+    writable_flag: Arc<AtomicBool>,
     pub pending: PendingWriters,
     writers: HashMap<Key, Writer>,
     buffered: HashMap<Key, Vec<Node>>,
@@ -102,6 +104,7 @@ impl ActiveWriters {
         Self {
             local: key,
             writable: false,
+            writable_flag: Arc::new(AtomicBool::new(false)),
             pending,
             writers,
             buffered: HashMap::new(),
@@ -143,14 +146,19 @@ impl ActiveWriters {
             .unwrap_or_default()
     }
 
-    /// `_getWakeupWriters`: the writers with work outstanding, as key + length.
+    /// `_getWakeupWriters`: the attached writers that are not pending, as key + head length.
+    /// A pending writer still has work queued, so its head is not ours to announce yet; a
+    /// drained one (the publisher's own writer after a publish) is what a peer's lookup needs.
     pub fn wakeup_writers(&self) -> Vec<Link> {
-        self.pending
-            .as_slice()
+        self.writers
             .iter()
-            .filter_map(|key| self.writers.get(key))
-            .filter(|writer| !writer.is_frozen && !writer.core.is_closed())
-            .map(|writer| Link {
+            .filter(|(key, writer)| {
+                writer.attached
+                    && !self.pending.contains(key)
+                    && !writer.is_frozen
+                    && !writer.core.is_closed()
+            })
+            .map(|(_, writer)| Link {
                 key: *writer.core.key(),
                 length: writer.core.length(),
             })
@@ -170,6 +178,12 @@ impl ActiveWriters {
             .writers
             .get(&self.local)
             .is_some_and(|writer| writer.is_added && !writer.is_removed);
+        self.writable_flag.store(self.writable, Ordering::Release);
+    }
+
+    /// The flag a synchronous `Autobee::writable` reads.
+    pub fn writable_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.writable_flag)
     }
 
     pub async fn update_local_state(
@@ -328,6 +342,7 @@ impl ActiveWriters {
         }
         let writer = self.writers.get_mut(&key).expect("added writer");
         let advanced = length > writer.hinted_length;
+        let attached = writer.attached;
         writer.hint(length);
         if length > 0 {
             // prefetch the oplog head for the fast-forward that runs right after
@@ -335,6 +350,12 @@ impl ActiveWriters {
             tokio::spawn(async move {
                 let _ = core.get(length - 1, Default::default()).await;
             });
+        }
+        if (added || advanced) && attached {
+            // A hint past what the system indexed is the only notice that this writer appended again:
+            // the indexer only visits queued writers, so an already-attached one that is not queued
+            // here is never re-read and its new blocks are never applied (JS re-scans every writer).
+            self.pending.insert(key);
         }
         if added || advanced {
             (self.wake)();
@@ -441,24 +462,24 @@ impl ActiveWriters {
                 continue;
             }
             writer.waiting = None;
+            if !writer.attached {
+                // A granted writer we are caught up on keeps its session but stops being
+                // announced and re-read: it is not the system head any more, and the next block it
+                // appends is only noticed through this writer's append/download events
+                // (`requeue_changed`). Closing it here parked the bee on a view the peer had
+                // already moved past. A hint re-attaches it through `add`.
+                continue;
+            }
             let length = writer.update(system, bootstrap).await?;
             if length < writer.core.length() || length < writer.hinted_length || writer.appending()
             {
-                if writer.attached {
-                    self.pending.insert(key);
-                }
+                self.pending.insert(key);
             } else if key != self.local && !writer.is_head {
-                // a writer we know from the system whose core head has not been
-                // announced yet: JS's `core.ready()` settles before this pass,
-                // a Rust store session can be ready with length 0. Keep it, the
-                // pending download bumps us when its head lands.
-                if writer.is_added && writer.core.length() == 0 {
-                    if writer.attached {
-                        self.pending.insert(key);
-                    }
-                    continue;
-                }
-                if let Some(writer) = self.detach(&key) {
+                if writer.is_added && !writer.is_removed {
+                    writer.attached = false;
+                } else if let Some(writer) = self.detach(&key) {
+                    // a writer the system never added (a stranger's optimistic write) or has
+                    // revoked keeps nothing: its blocks can never reach the view
                     writer.core.close();
                 }
             }
@@ -477,10 +498,12 @@ impl ActiveWriters {
         }
     }
 
-    /// Requeue external writers after an append or download notification.
+    /// Requeue external writers after an append or download notification. A block landing on a
+    /// hibernated writer is news: it re-attaches so the indexer reads it and peers hear its head.
     pub fn requeue_changed(&mut self) {
         for (key, writer) in &mut self.writers {
-            if writer.take_changed() && writer.attached && writer.waiting.is_none() {
+            if writer.take_changed() && writer.waiting.is_none() {
+                writer.attached = true;
                 self.pending.insert(*key);
             }
         }
@@ -1125,6 +1148,186 @@ mod tests {
             weight_hint: 0,
             drift: 0,
         }
+    }
+
+    /// A hint past the system's length must re-queue the writer: the indexer only visits queued
+    /// writers, so a second append from an already-attached peer would otherwise never be read.
+    #[tokio::test]
+    async fn an_advanced_hint_requeues_an_attached_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = corestore::Corestore::open_with_primary_key(dir.path(), [6; 32]).unwrap();
+        let local = store
+            .get(corestore::GetOptions::name("local"))
+            .await
+            .unwrap();
+        let remote = store
+            .get(corestore::GetOptions::name("remote"))
+            .await
+            .unwrap();
+        let remote_key = *remote.key();
+        let mut writers = ActiveWriters::new(local, Arc::new(|| {}), None);
+        let bootstrap = [6; 32];
+        assert!(
+            writers
+                .add(&store, &bootstrap, remote_key, true, 0)
+                .await
+                .unwrap()
+        );
+        // The queue drains once the writer is read and its block is indexed.
+        writers.pending.remove(&remote_key);
+        assert!(!writers.pending.as_slice().contains(&remote_key));
+
+        writers
+            .wakeup(&store, &bootstrap, remote_key, 2, true, 0)
+            .await
+            .unwrap();
+        assert!(
+            writers.pending.as_slice().contains(&remote_key),
+            "an advanced hint re-queues the writer"
+        );
+        assert_eq!(writers.get(&remote_key).unwrap().hinted_length, 2);
+    }
+
+    /// JS `_getWakeupWriters` announces the attached writers that are *not* pending: a drained
+    /// writer's head is what a peer's lookup needs. Announcing the pending ones instead left a
+    /// Rust publisher answering a lookup with nothing, and a Rust follower never started.
+    #[tokio::test]
+    async fn wakeup_writers_are_the_drained_attached_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = corestore::Corestore::open_with_primary_key(dir.path(), [7; 32]).unwrap();
+        let local = store
+            .get(corestore::GetOptions::name("local"))
+            .await
+            .unwrap();
+        let remote = store
+            .get(corestore::GetOptions::name("remote"))
+            .await
+            .unwrap();
+        let remote_key = *remote.key();
+        let mut writers = ActiveWriters::new(local, Arc::new(|| {}), None);
+        let bootstrap = [7; 32];
+        assert!(
+            writers
+                .add(&store, &bootstrap, remote_key, true, 0)
+                .await
+                .unwrap()
+        );
+        assert!(
+            writers
+                .wakeup_writers()
+                .iter()
+                .all(|link| link.key != remote_key),
+            "a queued writer is not announced yet"
+        );
+        writers.pending.remove(&remote_key);
+        let announced = writers.wakeup_writers();
+        assert!(
+            announced.iter().any(|link| link.key == remote_key),
+            "a drained writer is announced: {announced:?}"
+        );
+    }
+
+    /// A granted writer that stops being the system head keeps its session: the next block it
+    /// appends is only noticed through this writer's append/download events, so a `refresh` that
+    /// closes it leaves the bee parked on a view the peer has already moved past. A writer the
+    /// system never added (a stranger's optimistic write) still drops out.
+    #[tokio::test]
+    async fn refresh_keeps_a_granted_writer_that_stopped_being_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = corestore::Corestore::open_with_primary_key(dir.path(), [12; 32]).unwrap();
+        let local = store
+            .get(corestore::GetOptions::name("local"))
+            .await
+            .unwrap();
+        let remote = store
+            .get(corestore::GetOptions::name("remote"))
+            .await
+            .unwrap();
+        let stranger = store
+            .get(corestore::GetOptions::name("stranger"))
+            .await
+            .unwrap();
+        let local_key = *local.key();
+        let remote_key = *remote.key();
+        let stranger_key = *stranger.key();
+        remote.append(&[b"first"]).await.unwrap();
+
+        // The system knows the remote as a granted writer at its head length, while another
+        // writer owns the head: `refresh` used to detach a writer exactly in this state.
+        let mut system =
+            crate::system::SystemBee::new(hyperbee::Bee::open(&store, None).await.unwrap());
+        let view = system.bee.head().unwrap();
+        system
+            .add_writer(
+                remote_key,
+                crate::system::AddWriterOptions {
+                    length: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut head = node(4, 0);
+        head.key = local_key;
+        system.add_node(&head).unwrap();
+        system
+            .flush(std::slice::from_ref(&head), view)
+            .await
+            .unwrap();
+
+        let mut writers = ActiveWriters::new(local, Arc::new(|| {}), None);
+        assert!(
+            writers
+                .add(&store, &local_key, remote_key, true, 0)
+                .await
+                .unwrap()
+        );
+        assert!(
+            writers
+                .add(&store, &local_key, stranger_key, true, 0)
+                .await
+                .unwrap()
+        );
+        writers.pending.remove(&remote_key);
+        writers.pending.remove(&stranger_key);
+        writers.refresh(&system, &local_key).await.unwrap();
+
+        let kept = writers
+            .get(&remote_key)
+            .expect("a granted writer stays tracked");
+        assert!(!kept.core.is_closed(), "its session stays open");
+        assert!(!kept.attached, "a caught-up non-head writer hibernates");
+        assert!(
+            writers
+                .wakeup_writers()
+                .iter()
+                .all(|link| link.key != remote_key),
+            "a hibernated writer is not announced"
+        );
+        assert!(
+            writers.get(&stranger_key).is_none(),
+            "a writer the system never added is dropped"
+        );
+
+        let writer = writers.get_mut(&remote_key).unwrap();
+        writer.core.append(&[b"second"]).await.unwrap();
+        let mut requeued = false;
+        for _ in 0..200 {
+            writers.requeue_changed();
+            if writers.pending.as_slice().contains(&remote_key) {
+                requeued = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            requeued,
+            "a later block on the granted writer re-queues it for the indexer"
+        );
+        assert!(
+            writers.get(&remote_key).unwrap().attached,
+            "news re-attaches the writer so peers hear its head"
+        );
     }
 
     #[tokio::test]

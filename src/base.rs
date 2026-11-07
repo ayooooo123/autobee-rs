@@ -169,6 +169,8 @@ pub struct Autobee {
     pub local: Core,
     pub system: Mutex<SystemBee>,
     pub writers: Arc<Mutex<ActiveWriters>>,
+    /// `base.writable`, mirrored out of the writers lock so a sync reader never blocks.
+    writable_flag: Arc<AtomicBool>,
     /// Read-only snapshot moved to the working view's head before `update`.
     pub view: ApplyView,
     pub working_view: ApplyView,
@@ -218,6 +220,27 @@ impl Autobee {
         store: &Corestore,
         key: Option<Key>,
         handlers: Arc<dyn Handlers>,
+    ) -> Result<Arc<Self>> {
+        Self::open_shared(store, key, handlers, None).await
+    }
+
+    /// Opens on a node-wide wakeup swarm: a connection has one pairing owner,
+    /// so every bee a node replicates on it must share that owner, as the JS
+    /// node's single `ProtomuxWakeup` is shared between all its bees.
+    pub async fn open_with_wakeup(
+        store: &Corestore,
+        key: Option<Key>,
+        handlers: Arc<dyn Handlers>,
+        swarm: Arc<protomux_wakeup::WakeupSwarm>,
+    ) -> Result<Arc<Self>> {
+        Self::open_shared(store, key, handlers, Some(swarm)).await
+    }
+
+    async fn open_shared(
+        store: &Corestore,
+        key: Option<Key>,
+        handlers: Arc<dyn Handlers>,
+        shared_swarm: Option<Arc<protomux_wakeup::WakeupSwarm>>,
     ) -> Result<Arc<Self>> {
         handlers.wait().await;
         if handlers.encryption_key().is_some() {
@@ -294,7 +317,10 @@ impl Autobee {
             bump: Arc::clone(&bump),
             wakeup: StdMutex::new(None),
         });
-        let wakeup = Arc::new(AutobeeWakeup::new(host.clone()));
+        let wakeup = match shared_swarm {
+            Some(swarm) => Arc::new(AutobeeWakeup::with_swarm(host.clone(), swarm, false)),
+            None => Arc::new(AutobeeWakeup::new(host.clone())),
+        };
         let wake: crate::writers::Wake = {
             let bump = Arc::clone(&bump);
             Arc::new(move || bump.bump())
@@ -302,6 +328,7 @@ impl Autobee {
         let mut writers =
             ActiveWriters::new(boot.local, wake, Some(host.clone() as Arc<dyn Coupler>));
         writers.update_local_state(&system, &bootstrap_key).await?;
+        let writable_flag = writers.writable_flag();
 
         let flushes = system.flushes;
         let genesis = system.is_genesis();
@@ -327,6 +354,7 @@ impl Autobee {
             local,
             system: Mutex::new(system),
             writers: Arc::new(Mutex::new(writers)),
+            writable_flag,
             view,
             working_view,
             store: store.clone(),
@@ -1659,6 +1687,12 @@ impl Autobee {
         self.update().await
     }
 
+    /// `base.writable`: the local writer is granted and not removed. Readable without awaiting,
+    /// as the JS base exposes it.
+    pub fn writable(&self) -> bool {
+        self.writable_flag.load(Ordering::Acquire)
+    }
+
     /// Releases the view, then the writers, then the system and the wakeup.
     pub async fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -2564,6 +2598,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Corestore::open_with_primary_key(dir.path(), [33; 32]).unwrap();
         let db = open(&store, TestHandler::new(1_000)).await;
+        assert!(db.writable(), "the founder is writable before any batch");
         {
             let mut writers = db.writers.lock().await;
             let writer = writers.get_mut(&db.local_key).expect("local writer");
@@ -2598,6 +2633,10 @@ mod tests {
         assert!(
             db.writers.lock().await.writable,
             "the re-added local writer is writable without waiting for refresh"
+        );
+        assert!(
+            db.writable(),
+            "the synchronous flag follows the writers lock"
         );
         db.close().await.unwrap();
     }
