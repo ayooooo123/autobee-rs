@@ -2,7 +2,7 @@
 name = "autobee-rs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "Autobee (multi-writer hyperbee2 views over hypercores) for Rust, wire- and byte-compatible with npm autobee"
 keywords = ["autobee", "autobase", "hypercore", "p2p", "holepunch"]

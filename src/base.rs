@@ -89,7 +89,7 @@ impl Bump {
     fn keep_one(&self) {
         let _ = self
             .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                 Some(if pending <= 1 { 0 } else { 1 })
             });
     }
