@@ -854,6 +854,7 @@ async fn multi_value_append_matches_js() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    assert_eq!(applies.len(), 1, "multi-value append must apply as one batch");
     let mut nodes: Vec<Value> = Vec::new();
     for call in &applies {
         nodes.extend(call["nodes"].as_array().unwrap().iter().cloned());
@@ -874,5 +875,13 @@ async fn multi_value_append_matches_js() {
         Value::Array(fixture["apply"][0].as_array().unwrap().clone()),
         "multi-value append batch shape"
     );
+    let flushes = peer
+        .recorded
+        .flushes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(flushes.len(), 1, "multi-value append must flush as one batch");
+    assert_eq!(flushes[0]["batch"].as_array().unwrap().len(), 3);
     peer.db.close().await.unwrap();
 }

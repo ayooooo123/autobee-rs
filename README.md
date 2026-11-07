@@ -8,10 +8,12 @@ A Rust port of npm [`autobee`](https://www.npmjs.com/package/autobee) **2.12.1**
 One `Autobee` is one writer's materialised state: its local oplog, its own
 `system` and `view` cores under `autobee/<local>/view/...`, the remote writers
 it follows, and the drain loop that applies their batches in the reference's
-deterministic order. Every append, wakeup and update bumps one counter and
-waits for that drain; hints arriving on their own start it too. A drain error
-other than an application `interrupt()` closes the session, as the reference
-does: the failed batch is neither persisted nor resumed, so reopen to recover.
+deterministic order. Multi-value appends enter the local writer queue atomically,
+so the drain cannot split a batch. Every append, wakeup and update bumps one
+counter and waits for that drain; hints arriving on their own start it too. A
+drain error other than an application `interrupt()` closes the session, as the
+reference does: the failed batch is neither persisted nor resumed, so reopen to
+recover.
 
 Peers interoperate live: the system info, view rows and oplog bytes converge
 across the two implementations, a reopened peer resumes its session, and

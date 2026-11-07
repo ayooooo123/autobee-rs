@@ -1624,7 +1624,8 @@ impl Autobee {
             self.collect_approvals().await?
         };
 
-        let writable = self.writers.lock().await.writable;
+        let mut writers = self.writers.lock().await;
+        let writable = writers.writable;
         let count = values.len() as u64;
         for (index, value) in values.into_iter().enumerate() {
             let links = if index == 0 {
@@ -1632,7 +1633,7 @@ impl Autobee {
             } else {
                 Vec::new()
             };
-            let node = self.writers.lock().await.append_local(
+            let node = writers.append_local(
                 crate::encoding::OplogMessageV4 {
                     timestamp,
                     links,
@@ -1656,6 +1657,7 @@ impl Autobee {
                 return Err(std::io::Error::other("Autobee closed").into());
             }
         }
+        drop(writers);
 
         self.update().await
     }
