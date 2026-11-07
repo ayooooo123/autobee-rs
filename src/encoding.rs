@@ -227,8 +227,11 @@ pub struct LegacySystemInfo {
 pub fn decode_system_info(buf: impl Into<Bytes>) -> Result<SystemInfoValue> {
     let mut r = Reader::new(buf.into());
     // The wire version survives the map (versions 0 and 1 both decode to V1).
+    let start = r.position();
     let version = r.uint()?;
-    r.unread(1)?;
+    // rewind the whole varint, not one byte: a padded/non-minimal version must
+    // still decode as what it is rather than as the legacy map
+    r.unread(r.position() - start)?;
     Ok(match SystemInfo::decode(&mut r)? {
         SystemInfo::V1(info) => SystemInfoValue::Legacy(LegacySystemInfo {
             version,
@@ -534,4 +537,54 @@ pub fn encode_value(value: Bytes, opts: &ValueOptions) -> Bytes {
 /// `decodeValue` without an encryption key: the oplog's value.
 pub fn decode_value(buf: impl Into<Bytes>) -> Result<Option<Bytes>> {
     Ok(decode_oplog(buf)?.value().cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The version varint may be encoded in more bytes than it needs; rewinding
+    /// one byte instead of the whole varint read the padding as the version and
+    /// decoded a version 3 record as legacy.
+    #[test]
+    fn a_padded_version_varint_decodes_the_versioned_record() {
+        let info = SystemInfo::V3(SystemInfoV3 {
+            timestamp: 7,
+            flushes: 1,
+            view: Link {
+                key: [1; 32],
+                length: 1,
+            },
+            heads: vec![Link {
+                key: [2; 32],
+                length: 3,
+            }],
+            indexers: None,
+            pending: None,
+            hash: Some([9; 8]),
+        });
+        let encoded = encode_system_info(&info);
+        assert_eq!(encoded[0], 3, "minimal version prefix");
+
+        let mut padded = bytes::BytesMut::from(&[0xfd, 0x03, 0x00][..]);
+        padded.extend_from_slice(&encoded[1..]);
+        assert_eq!(
+            decode_system_info(padded.freeze()).expect("decode"),
+            SystemInfoValue::V3(SystemInfoV3 {
+                timestamp: 7,
+                flushes: 1,
+                view: Link {
+                    key: [1; 32],
+                    length: 1,
+                },
+                heads: vec![Link {
+                    key: [2; 32],
+                    length: 3,
+                }],
+                indexers: None,
+                pending: None,
+                hash: Some([9; 8]),
+            })
+        );
+    }
 }

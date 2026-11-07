@@ -4,6 +4,11 @@ use std::collections::HashMap;
 
 use crate::types::{Batch, Change, Head, Key, Link, Node, SortResult, WeightedLink};
 
+/// A writer read hands over at most this many blocks in one batch
+/// (`writers::BATCH_WRITER_SANITY`); a replayed batch wider than that is a
+/// forged range, not history this crate ever wrote.
+const MAX_INFLATED_BATCH: u64 = 1024;
+
 #[derive(Default)]
 pub struct Clock(HashMap<Key, u64>);
 
@@ -172,7 +177,7 @@ pub async fn get_oplog_batch<R: Reader>(
     else {
         return Ok(None);
     };
-    let seq = oplog.length - 1;
+    let seq = oplog.length.saturating_sub(1);
     if head.version <= crate::encoding::LEGACY_OPLOG_VERSION {
         for i in (1..oplog.length).rev() {
             let Some(previous) = reader.node(&oplog.key, i, oplog.weight, false, 0).await? else {
@@ -181,11 +186,16 @@ pub async fn get_oplog_batch<R: Reader>(
             if previous.batch.end == 0 {
                 break;
             }
-            head.batch.start += 1;
+            head.batch.start = head.batch.start.saturating_add(1);
         }
     }
+    // a batch that starts past its own head block, or reaches past what a
+    // writer read will hand over, is malformed: refuse it rather than wrap
+    if head.batch.start > seq || head.batch.end > MAX_INFLATED_BATCH {
+        return Ok(None);
+    }
     let start = seq - head.batch.start;
-    let end = seq + head.batch.end;
+    let end = seq.saturating_add(head.batch.end);
     let mut batch = Vec::new();
     for i in start..end {
         batch.push(
@@ -288,4 +298,98 @@ pub async fn replay<R: Reader>(reader: &mut R) -> Result<Vec<Option<Node>>, R::E
         }
     }
     Ok(nodes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::BatchCoords;
+
+    struct Fixed(Vec<Node>);
+
+    impl Reader for Fixed {
+        type Error = &'static str;
+
+        async fn history(&mut self, _wait: bool) -> Result<(), &'static str> {
+            Ok(())
+        }
+
+        async fn next_change(&mut self) -> Result<Option<Option<HistoryEntry>>, &'static str> {
+            Ok(None)
+        }
+
+        async fn node(
+            &mut self,
+            key: &Key,
+            length: u64,
+            _weight: i64,
+            _wait: bool,
+            _timeout: u64,
+        ) -> Result<Option<Node>, &'static str> {
+            Ok(self
+                .0
+                .iter()
+                .find(|node| &node.key == key && node.length == length)
+                .cloned())
+        }
+    }
+
+    fn node(start: u64, end: u64) -> Node {
+        Node {
+            core: None,
+            key: [1; 32],
+            length: 1,
+            weight: 0,
+            version: 4,
+            timestamp: 1,
+            links: Vec::new(),
+            batch: BatchCoords { start, end },
+            views: None,
+            trusted: Vec::new(),
+            witness: None,
+            approvals: None,
+            optimistic: false,
+            value: None,
+            hash: None,
+            weight_hint: 0,
+            drift: 0,
+        }
+    }
+
+    fn change() -> Change {
+        Change {
+            oplog: WeightedLink {
+                key: [1; 32],
+                length: 1,
+                weight: 0,
+                timestamp: 1,
+            },
+            undo: None,
+        }
+    }
+
+    /// A forged `batch.start` past the head block used to overflow-check-panic
+    /// (or wrap to an empty range in release) inside the drain; a ranged
+    /// `batch.end` would scan unboundedly. Both fail closed.
+    #[tokio::test]
+    async fn malformed_batch_ranges_are_refused() {
+        let mut reader = Fixed(vec![node(5, 0)]);
+        let inflated = get_oplog_batch(&mut reader, &change(), 0, false, 0)
+            .await
+            .unwrap();
+        assert!(inflated.is_none(), "start past the head is malformed");
+
+        let mut reader = Fixed(vec![node(0, u64::MAX)]);
+        let inflated = get_oplog_batch(&mut reader, &change(), 0, false, 0)
+            .await
+            .unwrap();
+        assert!(inflated.is_none(), "an unbounded end is malformed");
+
+        let mut reader = Fixed(vec![node(0, 0)]);
+        let inflated = get_oplog_batch(&mut reader, &change(), 0, false, 0)
+            .await
+            .unwrap()
+            .expect("a single-block batch inflates");
+        assert_eq!(inflated.batch.len(), 1);
+    }
 }

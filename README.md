@@ -9,7 +9,9 @@ One `Autobee` is one writer's materialised state: its local oplog, its own
 `system` and `view` cores under `autobee/<local>/view/...`, the remote writers
 it follows, and the drain loop that applies their batches in the reference's
 deterministic order. Every append, wakeup and update bumps one counter and
-waits for that drain; hints arriving on their own start it too.
+waits for that drain; hints arriving on their own start it too. A drain error
+other than an application `interrupt()` closes the session, as the reference
+does: the failed batch is neither persisted nor resumed, so reopen to recover.
 
 Peers interoperate live: the system info, view rows and oplog bytes converge
 across the two implementations, a reopened peer resumes its session, and
@@ -57,6 +59,8 @@ Every fixture is a recording of npm autobee 2.12.1 on `hyperbee2` 2.21.4,
   across the system, view and writer modes, 10 padding/envelope anchors and 60
   order-hash transitions.
 - `fixtures/boot-reference.json`: 13 boot scenarios.
+- `fixtures/append-batch-reference.json`: one `append([a, b, c])` call, its
+  three oplog blocks and the batch coordinates the handler receives.
 - `fixtures/units-reference.json`: 15 trigger steps, 3 genesis and 15 trust
   steps, 3 change scenarios and 10 apply-call steps.
 - `fixtures/traces/`: 7 recorded sessions (`single-writer`,
@@ -107,11 +111,12 @@ Regenerate the fixtures from the npm reference (Node 22 or later):
 ```sh
 cd fixtures/gen && npm install
 node boot.mjs && node encoding.mjs && node encryption.mjs && node units.mjs
-node record/run.mjs
+node append-batch.mjs && node record/run.mjs
 ```
 
-`record/run.mjs` writes `fixtures/traces/*.json`; the other scripts write the
-`*-reference.json` files. The interop tests need their own install:
+`record/run.mjs` writes `fixtures/traces/*.json`, `append-batch.mjs` writes
+the multi-append reference; the other scripts write the `*-reference.json`
+files. The interop tests need their own install:
 
 ```sh
 cd tests/js && npm install

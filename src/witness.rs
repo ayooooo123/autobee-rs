@@ -37,7 +37,7 @@ pub async fn resolve_weight<R: Reader>(reader: &mut R, node: &Node) -> Result<i6
     let Some(witness) = &node.witness else {
         return Ok(prev);
     };
-    let weight = witness.weight as i64;
+    let weight = i64::try_from(witness.weight).unwrap_or(i64::MAX);
     if weight <= prev || !verify_claim(reader, &node.key, weight, &witness.link).await? {
         return Ok(prev);
     }
@@ -61,12 +61,12 @@ pub async fn verify_claim<R: Reader>(
     else {
         return Ok(false);
     };
-    if (approval.weight as i64) < weight {
+    if i64::try_from(approval.weight).unwrap_or(i64::MAX) < weight {
         return Ok(false);
     }
     if &link.key == reader.bootstrap_key() {
-        return Ok(reader.bootstrap_weight() >= approval.weight as i64);
+        return Ok(reader.bootstrap_weight() >= i64::try_from(approval.weight).unwrap_or(i64::MAX));
     }
     let record = reader.standing(&link.key).await?;
-    Ok(current_weight(record.as_ref()) >= approval.weight as i64)
+    Ok(current_weight(record.as_ref()) >= i64::try_from(approval.weight).unwrap_or(i64::MAX))
 }

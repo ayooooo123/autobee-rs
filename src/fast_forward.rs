@@ -456,7 +456,14 @@ impl FastForward {
         let Some(head) = bee_head(self.head) else {
             return Ok(None);
         };
-        self.system.boot(head).await.map_err(|_| ())?;
+        // the reference passes `{ timeout }` to every system read: a peer that
+        // serves the oplog head but stalls its system core must not wedge the
+        // search (and, before, the drain behind it)
+        let timeout = Duration::from_millis(self.timeout);
+        match tokio::time::timeout(timeout, self.system.boot(head)).await {
+            Ok(result) => result.map_err(|_| ())?,
+            Err(_) => return Err(()),
+        }
 
         if self.system.version <= LEGACY_AUTOBASE_VERSION && !self.run_legacy(host).await {
             return Ok(None);
@@ -466,7 +473,10 @@ impl FastForward {
 
         // ensure local key is locally available always
         let local = host.local_key();
-        self.system.get(&local, false).await.map_err(|_| ())?;
+        match tokio::time::timeout(timeout, self.system.get(&local, false)).await {
+            Ok(result) => result.map_err(|_| ())?,
+            Err(_) => return Err(()),
+        };
 
         // a legacy system without the designated view migrates onto an empty view
         let mut view = None;
@@ -485,7 +495,10 @@ impl FastForward {
         }
 
         for head in self.system.heads.clone() {
-            self.system.get(&head.key, false).await.map_err(|_| ())?;
+            match tokio::time::timeout(timeout, self.system.get(&head.key, false)).await {
+                Ok(result) => result.map_err(|_| ())?,
+                Err(_) => return Err(()),
+            };
         }
 
         if let Some(warmup) = self.warmup.take() {

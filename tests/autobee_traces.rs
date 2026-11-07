@@ -790,3 +790,89 @@ async fn late_joiner_trace() {
 async fn fast_forward_landing_trace() {
     run_scenario("fast-forward-landing").await;
 }
+
+// ---------------------------------------------------------------------------
+// multi-value append
+
+/// `fixtures/gen/append-batch.mjs` records npm autobee appending three values in
+/// one call; a multi-value append must stamp the same coordinates JS does
+/// (`end: values.length - 1 - i`) and flush the same oplog bytes.
+const MULTI_APPEND: &str = include_str!("../fixtures/append-batch-reference.json");
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_value_append_matches_js() {
+    let fixture: Value = serde_json::from_str(MULTI_APPEND).unwrap();
+    let clock = Arc::new(AtomicU64::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let peer = open_peer(
+        dir.path(),
+        "a",
+        None,
+        false,
+        false,
+        None,
+        Arc::clone(&clock),
+    )
+    .await;
+    assert_eq!(
+        key_hex(&peer.db.local_key),
+        fixture["writer"].as_str().unwrap(),
+        "fixture writer key"
+    );
+    clock.store(fixture["clock"].as_u64().unwrap(), Ordering::Release);
+
+    let values: Vec<Bytes> = fixture["apply"][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| Bytes::from(decode_hex(node["value"].as_str().unwrap())))
+        .collect();
+    peer.db.append(values, false).await.unwrap();
+
+    let mut blocks = Vec::new();
+    for index in 0..peer.db.local.length() {
+        let block = peer
+            .db
+            .local
+            .get(index, hypercore::GetOptions::default())
+            .await
+            .unwrap()
+            .expect("local block");
+        blocks.push(hex(&block));
+    }
+    let expected: Vec<String> = fixture["oplog"]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(blocks, expected, "multi-value append oplog bytes");
+
+    let applies = peer
+        .recorded
+        .applies
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut nodes: Vec<Value> = Vec::new();
+    for call in &applies {
+        nodes.extend(call["nodes"].as_array().unwrap().iter().cloned());
+    }
+    let shapes: Vec<Value> = nodes
+        .iter()
+        .map(|node| {
+            json!({
+                "key": node["key"],
+                "length": node["length"],
+                "batch": node["batch"],
+                "value": node["value"],
+            })
+        })
+        .collect();
+    assert_eq!(
+        Value::Array(shapes),
+        Value::Array(fixture["apply"][0].as_array().unwrap().clone()),
+        "multi-value append batch shape"
+    );
+    peer.db.close().await.unwrap();
+}

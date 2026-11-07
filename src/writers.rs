@@ -29,6 +29,12 @@ const BATCH_WRITER_SANITY: usize = 1024;
 const BATCH_OPTIMISTIC_SANITY: u64 = 32;
 const MAX_FORWARD_TIME_DRIFT: u64 = 2 * 3600 * 1000;
 
+/// An approval weight is a writer's standing, and promotions keeps one digest
+/// slot per weight unit. The protocol caps untrusted writers at
+/// [`DEFAULT_MAX_UNTRUSTED_WRITERS`], so no honest grant can approach this:
+/// freeze a block above it instead of allocating the digest (JS OOMs here).
+const MAX_APPROVAL_WEIGHT: u64 = 1 << 20;
+
 /// The core-coupler side of a writer: announces the core over peers that lack
 /// it (JS `writer.couple()` / `decouple()`).
 pub trait Coupler: Send + Sync {
@@ -186,14 +192,15 @@ impl ActiveWriters {
         }
     }
 
-    pub fn append_local(&mut self, oplog: crate::encoding::OplogMessageV4, writable: bool) -> Node {
-        let node = self
-            .writers
-            .get_mut(&self.local)
-            .expect("local writer")
-            .append(oplog, writable);
+    /// `None` once `close()` dropped the local writer.
+    pub fn append_local(
+        &mut self,
+        oplog: crate::encoding::OplogMessageV4,
+        writable: bool,
+    ) -> Option<Node> {
+        let node = self.writers.get_mut(&self.local)?.append(oplog, writable);
         self.pending.insert(self.local);
-        node
+        Some(node)
     }
 
     pub async fn flush_local(
@@ -201,17 +208,19 @@ impl ActiveWriters {
         views: crate::types::Views,
         trusted: Option<Link>,
     ) -> hypercore::core::Result<bool> {
-        self.writers
-            .get_mut(&self.local)
-            .expect("local writer")
-            .flush(views, trusted)
-            .await
+        let Some(writer) = self.writers.get_mut(&self.local) else {
+            return Err(hypercore::core::CoreError::Closed);
+        };
+        writer.flush(views, trusted).await
     }
 
     pub async fn latest_local_oplog(
         &self,
     ) -> hyperbee::Result<Option<crate::encoding::DecodedOplog>> {
-        let core = &self.writers.get(&self.local).expect("local writer").core;
+        let Some(writer) = self.writers.get(&self.local) else {
+            return Err(hyperbee::Error::Message("Autobee closed"));
+        };
+        let core = &writer.core;
         if core.length() == 0 {
             return Ok(None);
         }
@@ -724,13 +733,21 @@ impl Writer {
             }
         };
         match oplog {
-            Ok(oplog) => Some(Node::from_oplog(
-                *self.core.key(),
-                index + 1,
-                weight,
-                &oplog,
-                Some(WriterRef(self.core.core().clone())),
-            )),
+            Ok(oplog) => {
+                // a weight above the bound is malformed: freezing skips the
+                // block without touching system bytes or the promotions digest
+                if approvals_over_bound(&oplog) {
+                    self.is_frozen = true;
+                    return None;
+                }
+                Some(Node::from_oplog(
+                    *self.core.key(),
+                    index + 1,
+                    weight,
+                    &oplog,
+                    Some(WriterRef(self.core.core().clone())),
+                ))
+            }
             Err(_) => {
                 self.is_frozen = true;
                 None
@@ -814,23 +831,31 @@ impl Writer {
                 flushes: 0,
             })
             .collect();
+        let head_index = self.processed - 1;
         let blocks: Vec<_> = pending[..self.processed]
             .iter()
-            .map(|node| {
+            .enumerate()
+            .map(|(index, node)| {
                 let mut oplog = crate::encoding::Oplog::V4(crate::encoding::OplogMessageV4 {
                     timestamp: node.timestamp,
                     links: node.links.clone(),
                     batch: Some(node.batch.clone()),
                     views: node.views.clone(),
-                    trusted: (!node.trusted.is_empty()).then(|| {
-                        node.trusted
-                            .iter()
-                            .map(|head| Link {
-                                key: head.key,
-                                length: head.length,
-                            })
-                            .collect()
-                    }),
+                    // `createNode` defaults `trusted` to `[]`, so only the
+                    // flushed head (which `flush` sets) encodes null when empty
+                    trusted: if node.trusted.is_empty() {
+                        (index != head_index).then(Vec::new)
+                    } else {
+                        Some(
+                            node.trusted
+                                .iter()
+                                .map(|head| Link {
+                                    key: head.key,
+                                    length: head.length,
+                                })
+                                .collect(),
+                        )
+                    },
                     witness: node.witness.clone(),
                     approvals: node.approvals.clone(),
                     optimistic: node.optimistic,
@@ -1035,6 +1060,8 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        // a detached writer must stop announcing its dead core
+        self.decouple();
         if let Some(events) = self.events.take() {
             events.abort();
         }
@@ -1042,6 +1069,18 @@ impl Drop for Writer {
             download.abort();
         }
     }
+}
+
+fn approvals_over_bound(oplog: &crate::encoding::DecodedOplog) -> bool {
+    let approvals = match oplog {
+        crate::encoding::DecodedOplog::Mapped(m) => m.approvals.as_ref(),
+        crate::encoding::DecodedOplog::V4(m) => m.approvals.as_ref(),
+    };
+    approvals.is_some_and(|approvals| {
+        approvals
+            .iter()
+            .any(|approval| approval.weight > MAX_APPROVAL_WEIGHT)
+    })
 }
 
 /// Normalize legacy batch coordinates while preserving unavailable blocks.
@@ -1287,5 +1326,103 @@ mod tests {
         finalize_node_batch(&mut modern);
         assert_eq!(modern[1].as_ref().unwrap().batch.start, 7);
         finalize_node_batch(&mut vec![None]);
+    }
+
+    async fn test_core(byte: u8, name: &str) -> (tempfile::TempDir, corestore::Corestore, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = corestore::Corestore::open_with_primary_key(dir.path(), [byte; 32]).unwrap();
+        let core = store.get(corestore::GetOptions::name(name)).await.unwrap();
+        (dir, store, core)
+    }
+
+    fn oplog(approvals: Option<Vec<crate::encoding::Approval>>) -> crate::encoding::OplogMessageV4 {
+        crate::encoding::OplogMessageV4 {
+            timestamp: 1,
+            links: vec![],
+            batch: None,
+            views: None,
+            trusted: None,
+            witness: None,
+            approvals,
+            optimistic: false,
+            value: Some(bytes::Bytes::from_static(b"value")),
+            hash: None,
+            weight_hint: None,
+            drift: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_approval_weight_freezes_the_writer() {
+        let (_dir, _store, core) = test_core(12, "remote").await;
+        let mut encoded =
+            crate::encoding::Oplog::V4(oplog(Some(vec![crate::encoding::Approval {
+                key: [1; 32],
+                // one byte over the bound: the promotions digest would resize by
+                // this many slots before any honest grant could reach it
+                weight: (1 << 20) + 1,
+            }])));
+        core.append(&[crate::encoding::encode_oplog(&mut encoded)])
+            .await
+            .unwrap();
+        let mut writer = Writer::new(core, false, Arc::new(|| {}), None);
+        assert!(writer.read_node(0, 0).is_none());
+        assert!(writer.is_frozen, "the malformed block freezes the writer");
+
+        // the same block within the bound still reads
+        let (_dir, _store, core) = test_core(13, "remote").await;
+        let mut encoded =
+            crate::encoding::Oplog::V4(oplog(Some(vec![crate::encoding::Approval {
+                key: [1; 32],
+                weight: 1 << 20,
+            }])));
+        core.append(&[crate::encoding::encode_oplog(&mut encoded)])
+            .await
+            .unwrap();
+        let mut writer = Writer::new(core, false, Arc::new(|| {}), None);
+        assert!(writer.read_node(0, 0).is_some());
+        assert!(!writer.is_frozen);
+    }
+
+    #[tokio::test]
+    async fn closed_writers_error_instead_of_panicking() {
+        let (_dir, _store, core) = test_core(14, "local").await;
+        let mut writers = ActiveWriters::new(core, Arc::new(|| {}), None);
+        writers.close();
+        assert!(writers.append_local(oplog(None), true).is_none());
+        let views = crate::types::Views {
+            flushes: 0,
+            system: crate::encoding::ExternalBatch {
+                key: [0; 32],
+                start: 0,
+                length: 0,
+            },
+            view: None,
+        };
+        assert!(writers.flush_local(views, None).await.is_err());
+        assert!(writers.latest_local_oplog().await.is_err());
+    }
+
+    struct CountingCoupler(std::sync::atomic::AtomicUsize);
+
+    impl Coupler for CountingCoupler {
+        fn add(&self, _core: Core) -> bool {
+            true
+        }
+        fn remove(&self, _core: &Core) -> bool {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_writer_decouples_its_core() {
+        let (_dir, _store, core) = test_core(15, "head").await;
+        let coupler = Arc::new(CountingCoupler(std::sync::atomic::AtomicUsize::new(0)));
+        let mut writer = Writer::new(core, false, Arc::new(|| {}), Some(coupler.clone()));
+        writer.couple();
+        assert!(writer.is_coupled);
+        drop(writer);
+        assert_eq!(coupler.0.load(Ordering::Acquire), 1, "drop decouples");
     }
 }

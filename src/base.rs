@@ -83,6 +83,16 @@ impl Bump {
     fn take(&self) -> u64 {
         self.pending.load(Ordering::Acquire)
     }
+
+    /// Collapse the counter to "one more pass" without losing a bump that
+    /// landed between the pass and this call (JS is single-threaded here).
+    fn keep_one(&self) {
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                Some(if pending <= 1 { 0 } else { 1 })
+            });
+    }
 }
 
 /// The mutable odds and ends the drain carries between steps. One std mutex,
@@ -194,6 +204,8 @@ pub struct Autobee {
     wake_host: Arc<WakeupHost>,
     drain_lock: Mutex<()>,
     driver: StdMutex<Option<JoinHandle<()>>>,
+    /// The spawned `_searchFastForward` task, aborted with the session.
+    ff_search: StdMutex<Option<JoinHandle<()>>>,
     weak_self: StdMutex<Weak<Autobee>>,
     last_error: StdMutex<Option<String>>,
     flush_observer: StdMutex<Option<Arc<dyn FlushObserver>>>,
@@ -349,6 +361,7 @@ impl Autobee {
             wake_host: host,
             drain_lock: Mutex::new(()),
             driver: StdMutex::new(None),
+            ff_search: StdMutex::new(None),
             weak_self: StdMutex::new(Weak::new()),
             last_error: StdMutex::new(None),
             flush_observer: StdMutex::new(None),
@@ -442,6 +455,20 @@ impl Autobee {
     /// Serialises drains: callers and the driver share one drain at a time and
     /// a caller that finds its bump already consumed returns immediately.
     async fn run_drain(&self) -> Result<()> {
+        match self.drain_loop().await {
+            Ok(()) => Ok(()),
+            // the reference closes on any error but INTERRUPT, which leaves
+            // `_interrupting` set and resumes on the dirty in-memory state
+            Err(err) if self.is_interrupting() => Err(err),
+            Err(err) => {
+                self.on_error(&err);
+                self.close().await?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn drain_loop(&self) -> Result<()> {
         loop {
             let _guard = self.drain_lock.lock().await;
             if self.bump.take() == 0 || self.closed.load(Ordering::Acquire) {
@@ -474,10 +501,7 @@ impl Autobee {
             let result = self.drain_pass().await;
             // the reference's `finally`: one bump survives so an append that
             // landed mid-pass gets its own pass
-            let pending = self.bump.take();
-            self.bump
-                .pending
-                .store(if pending == 1 { 0 } else { 1 }, Ordering::Release);
+            self.bump.keep_one();
             result?;
         }
 
@@ -555,20 +579,23 @@ impl Autobee {
                 let system = self.system.lock().await;
                 system.get(&link.key, false).await?
             };
-            match known {
-                // an unknown length is `-1`: always behind a known record
-                Some(info) if link.length == UNKNOWN_LENGTH || info.length >= link.length => {
-                    continue;
-                }
-                _ => results.push(Link {
-                    key: link.key,
-                    length: if link.length == UNKNOWN_LENGTH {
-                        0
-                    } else {
-                        link.length
-                    },
-                }),
+            // `_filterTracked`: a zero length always passes through and
+            // re-activates the writer; a known length only skips a hint at or
+            // behind what the system already has.
+            if link.length != 0
+                && let Some(info) = &known
+                && (link.length == UNKNOWN_LENGTH || info.length >= link.length)
+            {
+                continue;
             }
+            results.push(Link {
+                key: link.key,
+                length: if link.length == UNKNOWN_LENGTH {
+                    0
+                } else {
+                    link.length
+                },
+            });
         }
 
         for link in &results {
@@ -643,10 +670,11 @@ impl Autobee {
             self.lock_seeds().ff_searching = false;
             return;
         };
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             auto.search_fast_forward().await;
             auto.lock_seeds().ff_searching = false;
         });
+        *self.ff_search.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
     /// `_searchFastForward`.
@@ -1006,17 +1034,14 @@ impl Autobee {
             self.stats.undos.fetch_add(1, Ordering::Relaxed);
             self.trusted.clear();
             let mut system = self.system.lock().await;
-            let view = match undo.key {
-                Some(key) => {
-                    system
-                        .undo(BeeHead {
-                            key,
-                            length: undo.length,
-                        })
-                        .await?
-                }
-                None => None,
-            };
+            // an empty undo head resets the system to its own local core, as
+            // `open` boots it; skipping the undo leaves head and view forked
+            let view = system
+                .undo(BeeHead {
+                    key: undo.key.unwrap_or(*self.system_core.key()),
+                    length: undo.length,
+                })
+                .await?;
             self.flushes.store(system.flushes, Ordering::Release);
             self.genesis.store(system.is_genesis(), Ordering::Release);
             let view = view.unwrap_or(BeeHead {
@@ -1052,10 +1077,19 @@ impl Autobee {
                 continue;
             }
 
-            if batch[0].key == self.key && batch[0].length == 1 {
+            // the nodes to apply carry the sort weight `prepareBatch` resolved;
+            // the reference mutates the caller's array in place, so the stamped
+            // entry replaces the original here (multi-value appends depend on it)
+            let Some(stamped) = sorted.tip.into_iter().next() else {
+                continue;
+            };
+            let batch: Vec<Node> = stamped.into_iter().flatten().collect();
+            let Some(head) = batch.first() else { continue };
+
+            if head.key == self.key && head.length == 1 {
                 let host = ApplyCalls::new(self, None);
                 host.add_writer(
-                    batch[0].key,
+                    head.key,
                     AddWriterOptions {
                         is_indexer: true,
                         weight: Some(self.handlers.bootstrap_weight()),
@@ -1064,7 +1098,7 @@ impl Autobee {
                 .await?;
             }
 
-            self.apply_batch(&batch, batch[0].optimistic).await?;
+            self.apply_batch(&batch, head.optimistic).await?;
         }
         Ok(())
     }
@@ -1180,6 +1214,11 @@ impl Autobee {
                         DEFAULT_MAX_UNTRUSTED_WRITERS,
                     )
                     .await?;
+                // JS `add` calls updateLocalState for the local key: a re-added
+                // local writer must be writable before the next local flush
+                if key == self.local_key {
+                    writers.update_local_state(&system, &self.key).await?;
+                }
             } else {
                 writers.remove(&key, &system, &self.key).await?;
             }
@@ -1223,7 +1262,7 @@ impl Autobee {
         let now = self.handlers.now();
         let timestamp = timestamp.max(now);
         let writable = self.writers.lock().await.writable;
-        self.writers.lock().await.append_local(
+        let node = self.writers.lock().await.append_local(
             crate::encoding::OplogMessageV4 {
                 timestamp,
                 links,
@@ -1240,7 +1279,7 @@ impl Autobee {
             },
             writable,
         );
-        Ok(true)
+        Ok(node.is_some())
     }
 
     async fn all_heads_trusted(&self) -> bool {
@@ -1263,9 +1302,11 @@ impl Autobee {
             let value = latest
                 .as_ref()
                 .and_then(|oplog| match oplog {
-                    crate::encoding::DecodedOplog::Mapped(_) => None,
-                    crate::encoding::DecodedOplog::V4(message) => {
-                        message.views.as_ref().map(|views| views.flushes)
+                    crate::encoding::DecodedOplog::Mapped(m) => {
+                        m.views.as_ref().map(|views| views.flushes)
+                    }
+                    crate::encoding::DecodedOplog::V4(m) => {
+                        m.views.as_ref().map(|views| views.flushes)
                     }
                 })
                 .unwrap_or_else(|| self.flushes());
@@ -1493,19 +1534,20 @@ impl Autobee {
         };
 
         let writable = self.writers.lock().await.writable;
+        let count = values.len() as u64;
         for (index, value) in values.into_iter().enumerate() {
             let links = if index == 0 {
                 links.clone()
             } else {
                 Vec::new()
             };
-            self.writers.lock().await.append_local(
+            let node = self.writers.lock().await.append_local(
                 crate::encoding::OplogMessageV4 {
                     timestamp,
                     links,
                     batch: Some(crate::types::BatchCoords {
                         start: index as u64,
-                        end: 0,
+                        end: count - 1 - index as u64,
                     }),
                     views: None,
                     trusted: None,
@@ -1519,6 +1561,9 @@ impl Autobee {
                 },
                 writable,
             );
+            if node.is_none() {
+                return Err(std::io::Error::other("Autobee closed").into());
+            }
         }
 
         self.update().await
@@ -1629,6 +1674,17 @@ impl Autobee {
         if let Some(driver) = self.driver.lock().unwrap_or_else(|e| e.into_inner()).take() {
             driver.abort();
         }
+        if let Some(search) = self
+            .ff_search
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            // the search holds an Arc<Autobee>; nothing may keep reading after
+            // the sessions close
+            search.abort();
+            self.lock_seeds().ff_searching = false;
+        }
 
         let view_result = self.view.close(self.handlers.as_ref()).await;
         self.writers.lock().await.close();
@@ -1656,8 +1712,24 @@ fn spawn_driver(auto: &Arc<Autobee>) {
             if auto.closed.load(Ordering::Acquire) {
                 return;
             }
-            if let Err(err) = auto.run_drain().await {
-                auto.on_error(err);
+            // a panic in the drain must not kill the session silently: the
+            // inner task reports it as a JoinError and the base closes
+            let drain = {
+                let drain_auto = Arc::clone(&auto);
+                tokio::spawn(async move { drain_auto.drain_loop().await })
+            };
+            match drain.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    auto.on_error(&err);
+                    auto.close_soon();
+                    return;
+                }
+                Err(err) => {
+                    eprintln!("autobee: drain task failed: {err}");
+                    auto.close_soon();
+                    return;
+                }
             }
         }
     });
@@ -1665,10 +1737,27 @@ fn spawn_driver(auto: &Arc<Autobee>) {
 }
 
 impl Autobee {
-    fn on_error(&self, err: Error) {
+    /// Records the drain failure. INTERRUPT is not fatal (`interrupting` stays
+    /// set); callers close on every other error.
+    fn on_error(&self, err: &Error) {
         let message = err.to_string();
         *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
-        self.interrupting.store(false, Ordering::Release);
+    }
+
+    /// Closes from a spawned task: `close()` aborts the driver, so the driver
+    /// must not await it itself.
+    fn close_soon(&self) {
+        let Some(auto) = self
+            .weak_self
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .upgrade()
+        else {
+            return;
+        };
+        tokio::spawn(async move {
+            let _ = auto.close().await;
+        });
     }
 }
 
@@ -2021,19 +2110,27 @@ impl Host for Autobee {
     fn open_view(
         &self,
         head: crate::types::Head,
-        _timeout: u64,
+        timeout: u64,
     ) -> crate::fast_forward::BoxFuture<'_, Option<Bee>> {
         Box::pin(async move {
             let key = head.key?;
-            let bee = self
-                .view
-                .bee()
-                .checkout(BeeHead {
+            let timeout = std::time::Duration::from_millis(if timeout == 0 {
+                FastForward::DEFAULT_TIMEOUT
+            } else {
+                timeout
+            });
+            // hyperbee has no per-checkout read options, so the open itself is
+            // bounded here; later reads are bounded by the callers
+            let bee = tokio::time::timeout(
+                timeout,
+                self.view.bee().checkout(BeeHead {
                     key,
                     length: head.length,
-                })
-                .await
-                .ok()?;
+                }),
+            )
+            .await
+            .ok()?
+            .ok()?;
             Some(self.handlers.open(bee))
         })
     }
@@ -2068,8 +2165,10 @@ impl Host for Autobee {
         Box::pin(async move {
             // every autobee core this crate opens uses manifest version 3, so a
             // core that needs reindexing is legacy storage, which is refused
+            // here; an unfetchable manifest is `unknown` (JS passes
+            // `{ unknown: true }`) and fails the candidate closed
             let Ok(core) = self.store.get(GetOptions::key(key)).await else {
-                return false;
+                return true;
             };
             let mut manifest = core.manifest();
             if manifest.is_none() && length > 0 {
@@ -2078,13 +2177,12 @@ impl Host for Autobee {
                     timeout: (timeout > 0).then(|| std::time::Duration::from_millis(timeout)),
                     ..Default::default()
                 };
-                let _ = core.get_raw_local(length - 1).ok();
                 let _ = core.get(length - 1, options).await;
                 manifest = core.manifest();
             }
             core.close();
             let Some(manifest) = manifest else {
-                return false;
+                return true;
             };
             manifest.version < crate::constants::DEFAULT_MANIFEST_VERSION && manifest.version > 1
         })
@@ -2265,5 +2363,370 @@ impl Autobee {
         append?;
         self.system.lock().await.add_anchor(result.key);
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    use bytes::Bytes;
+
+    use crate::apply_calls::ApplyCalls;
+    use crate::apply_calls::BoxFuture;
+    use crate::updates::Changes;
+
+    struct TestHandler {
+        clock: AtomicU64,
+        fail_once: AtomicBool,
+        panic_once: AtomicBool,
+        bootstrap_weight: u64,
+        fast_forward: bool,
+    }
+
+    impl TestHandler {
+        fn new(clock: u64) -> Arc<Self> {
+            Arc::new(Self {
+                clock: AtomicU64::new(clock),
+                fail_once: AtomicBool::new(false),
+                panic_once: AtomicBool::new(false),
+                bootstrap_weight: 2,
+                fast_forward: false,
+            })
+        }
+    }
+
+    impl Handlers for TestHandler {
+        fn apply<'a, 'b>(
+            &'a self,
+            _nodes: &'a [Node],
+            _view: &'a Bee,
+            _host: &'a ApplyCalls<'a, 'b>,
+        ) -> BoxFuture<'a, crate::apply_calls::Result<()>> {
+            Box::pin(async move {
+                if self.panic_once.swap(false, Ordering::AcqRel) {
+                    panic!("handler panic");
+                }
+                if self.fail_once.swap(false, Ordering::AcqRel) {
+                    return Err(crate::apply_calls::Error::from(
+                        Box::new(std::io::Error::other("handler failed"))
+                            as Box<dyn std::error::Error + Send + Sync>,
+                    ));
+                }
+                Ok(())
+            })
+        }
+
+        fn update<'a>(&'a self, _view: &'a Bee, _changes: &'a Changes) -> BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn now(&self) -> u64 {
+            self.clock.load(Ordering::Acquire)
+        }
+
+        fn fast_forward(&self) -> Option<crate::apply_view::FastForwardOptions> {
+            self.fast_forward
+                .then(crate::apply_view::FastForwardOptions::default)
+        }
+
+        fn bootstrap_weight(&self) -> u64 {
+            self.bootstrap_weight
+        }
+    }
+
+    async fn open(store: &Corestore, handler: Arc<TestHandler>) -> Arc<Autobee> {
+        Autobee::open(store, None, handler as Arc<dyn Handlers>)
+            .await
+            .expect("open")
+    }
+
+    /// The reference resets the counter to "one more pass" in a `finally` while
+    /// a core event may bump on another worker; an update that landed between
+    /// the pass and the reset must survive.
+    #[test]
+    fn a_bump_racing_a_drain_pass_is_not_lost() {
+        let bump = Bump::default();
+        bump.bump();
+        assert_eq!(bump.take(), 1, "the pass starts with one pending bump");
+        bump.bump();
+        bump.bump();
+        bump.keep_one();
+        assert_eq!(bump.take(), 1, "a bump that landed mid-pass survives");
+        bump.keep_one();
+        assert_eq!(bump.take(), 0);
+    }
+
+    /// A handler error leaves `apply_batch` half done on the dirty in-memory
+    /// system; resuming would chain `advance_hash` twice and persist a system
+    /// no JS peer can reconcile. The reference closes instead of resetting.
+    #[tokio::test]
+    async fn drain_error_closes_the_base_and_persists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [31; 32]).unwrap();
+        let handler = TestHandler::new(1_000);
+        handler.fail_once.store(true, Ordering::Release);
+        let db = open(&store, Arc::clone(&handler)).await;
+        let key = db.key;
+
+        let _ = db.append(vec![Bytes::from_static(b"lost")], false).await;
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !db.closed.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the base closes on a handler error");
+        assert!(db.last_error().is_some(), "the error is recorded");
+        assert_eq!(db.flushes(), 0, "no system flush was persisted");
+        assert_eq!(db.local.length(), 0, "no oplog block was persisted");
+
+        let err = db
+            .append(vec![Bytes::from_static(b"after")], false)
+            .await
+            .expect_err("a closed base refuses appends");
+        assert!(err.to_string().contains("Autobee closed"));
+
+        // reopening the same store sees none of the failed batch
+        let reopened = Autobee::open(&store, Some(key), Arc::clone(&handler) as Arc<dyn Handlers>)
+            .await
+            .expect("reopen");
+        assert_eq!(reopened.flushes(), 0);
+        assert!(
+            reopened
+                .working_view
+                .bee()
+                .head()
+                .is_none_or(|h| h.length == 0)
+        );
+        reopened.close().await.unwrap();
+    }
+
+    /// `prepareBatch` used to skip `system.undo` when the reordered change's
+    /// tail is the empty head (`key: null`), moving only the working view and
+    /// leaving heads/hash/flushes at the old system. It must reset the system
+    /// to its own local core, as `open` boots it.
+    #[tokio::test]
+    async fn undo_to_the_empty_head_resets_the_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [32; 32]).unwrap();
+        let mut handler = TestHandler::new(2_000);
+        // a zero bootstrap weight lets an older foreign block sort first
+        Arc::get_mut(&mut handler).unwrap().bootstrap_weight = 0;
+        let db = open(&store, Arc::clone(&handler)).await;
+
+        db.append(vec![Bytes::from_static(b"first")], false)
+            .await
+            .expect("append");
+        assert_eq!(db.flushes(), 1, "one system flush to undo");
+
+        let node = Node {
+            core: None,
+            key: [9; 32],
+            length: 1,
+            weight: 0,
+            version: 4,
+            timestamp: 1_000,
+            links: Vec::new(),
+            batch: crate::types::BatchCoords { start: 0, end: 0 },
+            views: None,
+            trusted: Vec::new(),
+            witness: None,
+            approvals: None,
+            optimistic: false,
+            value: Some(Bytes::from_static(b"older")),
+            hash: None,
+            weight_hint: 0,
+            drift: 0,
+        };
+        let sort = db.prepare_batch(&[node]).await.expect("prepare");
+        assert_eq!(db.stats.undos.load(Ordering::Acquire), 1, "an undo ran");
+        assert_eq!(db.flushes(), 0, "the system reset to the empty head");
+        assert!(
+            db.system
+                .lock()
+                .await
+                .bee
+                .head()
+                .is_none_or(|h| h.length == 0)
+        );
+        assert!(db.genesis.load(Ordering::Acquire));
+        assert_eq!(sort.view.map(|head| head.length), Some(0));
+        db.close().await.unwrap();
+    }
+
+    /// A system flush re-adds the local writer in the same batch; the changed
+    /// loop must refresh its membership before the next local flush reads
+    /// `writable` (JS `writers.add` calls `updateLocalState`).
+    #[tokio::test]
+    async fn a_readded_local_writer_is_writable_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [33; 32]).unwrap();
+        let db = open(&store, TestHandler::new(1_000)).await;
+        {
+            let mut writers = db.writers.lock().await;
+            let writer = writers.get_mut(&db.local_key).expect("local writer");
+            writer.is_removed = true;
+            writers.writable = false;
+        }
+
+        let node = Node {
+            core: None,
+            key: [8; 32],
+            length: 1,
+            weight: 1,
+            version: 4,
+            timestamp: 1,
+            links: Vec::new(),
+            batch: crate::types::BatchCoords { start: 0, end: 0 },
+            views: None,
+            trusted: Vec::new(),
+            witness: None,
+            // the batch carries an approval that re-adds the local writer
+            approvals: Some(vec![crate::encoding::Approval {
+                key: db.local_key,
+                weight: 1,
+            }]),
+            optimistic: false,
+            value: None,
+            hash: None,
+            weight_hint: 0,
+            drift: 0,
+        };
+        db.apply_batch(&[node], false).await.expect("apply");
+        assert!(
+            db.writers.lock().await.writable,
+            "the re-added local writer is writable without waiting for refresh"
+        );
+        db.close().await.unwrap();
+    }
+
+    /// An unfetchable manifest is `unknown`, not "no reindex": the candidate
+    /// must fail closed instead of landing on a system that cannot be read.
+    #[tokio::test]
+    async fn should_reindex_fails_closed_on_an_unknown_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [34; 32]).unwrap();
+        let db = open(&store, TestHandler::new(1_000)).await;
+        let should = crate::fast_forward::Host::should_reindex(&*db, [7; 32], 5, 50).await;
+        assert!(should, "a manifest that cannot be fetched is unknown");
+        db.close().await.unwrap();
+    }
+
+    /// The spawned fast-forward search holds an `Arc<Autobee>` and reads
+    /// sessions; `close` must abort it rather than leave it searching a closed
+    /// store.
+    #[tokio::test]
+    async fn close_aborts_a_running_fast_forward_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [35; 32]).unwrap();
+        let mut handler = TestHandler::new(1_000);
+        Arc::get_mut(&mut handler).unwrap().fast_forward = true;
+        let db = open(&store, handler).await;
+        db.queue_fast_forward(&[Link {
+            key: [5; 32],
+            length: 3,
+        }]);
+        assert!(
+            db.ff_search
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "the search task is tracked"
+        );
+        db.close().await.unwrap();
+        assert!(
+            db.ff_search
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none(),
+            "close aborts and drops the search task"
+        );
+        assert!(!db.lock_seeds().ff_searching);
+    }
+
+    /// `_flushesBehind` reads the flush count from the last local oplog record;
+    /// a version 3 (mapped) record carries `views` too, so it must not fall
+    /// back to the *current* flush count and report zero behind.
+    #[tokio::test]
+    async fn flushes_behind_reads_mapped_oplog_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [36; 32]).unwrap();
+        let db = open(&store, TestHandler::new(1_000)).await;
+        db.append(vec![Bytes::from_static(b"first")], false)
+            .await
+            .expect("append");
+        assert_eq!(db.flushes(), 1);
+
+        let mut oplog = crate::encoding::Oplog::V3(crate::encoding::OplogMessageV3 {
+            timestamp: 2,
+            links: Vec::new(),
+            batch: None,
+            views: Some(crate::types::Views {
+                flushes: 0,
+                system: crate::encoding::ExternalBatch {
+                    key: *db.system_core.key(),
+                    start: 0,
+                    length: 1,
+                },
+                view: None,
+            }),
+            optimistic: false,
+            value: None,
+            witness: None,
+            attestations: None,
+            trusted: None,
+        });
+        db.local
+            .append(&[crate::encoding::encode_oplog(&mut oplog)])
+            .await
+            .expect("append mapped oplog");
+        db.lock_seeds().ack_flushes = -1;
+        assert_eq!(
+            db.flushes_behind().await.expect("flushes behind"),
+            1,
+            "the mapped record's views.flushes is read"
+        );
+        db.close().await.unwrap();
+    }
+
+    /// A panic in the drain used to kill the driver task silently; the session
+    /// must close instead of sitting un-drained forever.
+    #[tokio::test]
+    async fn a_panicking_drain_closes_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [37; 32]).unwrap();
+        let handler = TestHandler::new(1_000);
+        let db = open(&store, Arc::clone(&handler)).await;
+        let writable = db.writers.lock().await.writable;
+        db.writers.lock().await.append_local(
+            crate::encoding::OplogMessageV4 {
+                timestamp: 1,
+                links: Vec::new(),
+                batch: None,
+                views: None,
+                trusted: None,
+                witness: None,
+                approvals: None,
+                optimistic: false,
+                value: Some(Bytes::from_static(b"boom")),
+                hash: None,
+                weight_hint: None,
+                drift: None,
+            },
+            writable,
+        );
+        handler.panic_once.store(true, Ordering::Release);
+        // only the driver runs this drain: the caller path would propagate the
+        // panic into the test task instead
+        db.bump_soon();
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !db.closed.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "a panicking drain closes the base");
     }
 }

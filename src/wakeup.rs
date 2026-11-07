@@ -228,7 +228,10 @@ impl Shared {
             for link in hints {
                 match st.hints.iter_mut().find(|h| h.key == link.key) {
                     Some(prev) => {
-                        if link.length == UNKNOWN_LENGTH || prev.length < link.length {
+                        if link.length == UNKNOWN_LENGTH
+                            || prev.length < link.length
+                            || prev.length == UNKNOWN_LENGTH
+                        {
                             *prev = link.clone();
                         }
                     }
@@ -275,4 +278,49 @@ fn links(writers: &[Writer_]) -> Vec<Link> {
             length: w.length,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Stub(Core);
+
+    impl WakeupBase for Stub {
+        fn bootstrap(&self) -> Core {
+            self.0.clone()
+        }
+
+        fn wakeup_writers(&self) -> Vec<Link> {
+            Vec::new()
+        }
+
+        fn bump_soon(&self) {}
+    }
+
+    /// An unknown length (`-1`) is a placeholder, not a maximum: a later known
+    /// length must replace it, or the writer is never fast-forwarded from.
+    #[tokio::test]
+    async fn a_known_length_replaces_an_unknown_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = corestore::Corestore::open_with_primary_key(dir.path(), [41; 32]).unwrap();
+        let core = store
+            .get(corestore::GetOptions::name("bootstrap"))
+            .await
+            .unwrap();
+        let wakeup = AutobeeWakeup::new(Arc::new(Stub(core.core().clone())));
+        let key = [2u8; 32];
+
+        wakeup.hint(&[Link {
+            key,
+            length: UNKNOWN_LENGTH,
+        }]);
+        wakeup.hint(&[Link { key, length: 42 }]);
+        assert_eq!(wakeup.flush(), vec![Link { key, length: 42 }]);
+
+        // a shorter known length still never wins over a longer one
+        wakeup.hint(&[Link { key, length: 50 }]);
+        wakeup.hint(&[Link { key, length: 10 }]);
+        assert_eq!(wakeup.flush(), vec![Link { key, length: 50 }]);
+    }
 }
