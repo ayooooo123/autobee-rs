@@ -463,11 +463,12 @@ impl ActiveWriters {
             }
             writer.waiting = None;
             if !writer.attached {
-                // A granted writer we are caught up on keeps its session but stops being
-                // announced and re-read: it is not the system head any more, and the next block it
-                // appends is only noticed through this writer's append/download events
-                // (`requeue_changed`). Closing it here parked the bee on a view the peer had
-                // already moved past. A hint re-attaches it through `add`.
+                // JS `Writer.reset` detaches and closes a caught-up non-head writer here. Doing
+                // that in Rust closed the only session this writer has: the peer's next block --
+                // a delete propagating, say -- then never reached the view, and the group log's
+                // hint only re-adds writers that append again (`network_mixed_b`'s ACL case).
+                // So the session stays: unannounced and unread, but still watching its core, and
+                // a hint re-attaches it through `add`.
                 continue;
             }
             let length = writer.update(system, bootstrap).await?;

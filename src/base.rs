@@ -18,7 +18,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use corestore::{Corestore, GetOptions};
+use corestore::{Corestore, GetOptions, GroupNotify};
 use hyperbee::{Bee, Head as BeeHead};
 use hypercore::core::{Core, Session};
 use tokio::sync::{Mutex, Notify};
@@ -206,6 +206,8 @@ pub struct Autobee {
     wake_host: Arc<WakeupHost>,
     drain_lock: Mutex<()>,
     driver: StdMutex<Option<JoinHandle<()>>>,
+    /// The spawned group-log reader (JS `_notifyHandler`), aborted with the session.
+    group_updates: StdMutex<Option<JoinHandle<()>>>,
     /// The spawned `_searchFastForward` task, aborted with the session.
     ff_search: StdMutex<Option<JoinHandle<()>>>,
     weak_self: StdMutex<Weak<Autobee>>,
@@ -389,6 +391,7 @@ impl Autobee {
             wake_host: host,
             drain_lock: Mutex::new(()),
             driver: StdMutex::new(None),
+            group_updates: StdMutex::new(None),
             ff_search: StdMutex::new(None),
             weak_self: StdMutex::new(Weak::new()),
             last_error: StdMutex::new(None),
@@ -411,6 +414,15 @@ impl Autobee {
         auto.wakeup
             .set_capability(capability.key, Some(capability.discovery_key));
         auto.refresh_wakeup_writers().await;
+
+        // every writer core belongs to this bee's group, so an append anywhere
+        // is a hint; the log also carries what happened while nobody listened
+        if auto.bootstrap.key() != &auto.local_key && !auto.store.read_only() {
+            auto.bootstrap.set_group(capability.discovery_key).await?;
+        }
+        let notify = auto.store.notify_group(capability.discovery_key)?;
+        auto.drain_boot_hints(&notify).await?;
+        auto.watch_group(notify);
 
         spawn_driver(&auto);
         auto.update_acking().await;
@@ -462,6 +474,57 @@ impl Autobee {
     /// `bumpSoon()`: mark work and let the driver pick it up.
     pub fn bump_soon(&self) {
         self.bump.bump();
+    }
+
+    /// `_onGroupUpdate`: a core in the group moved, so its head is news.
+    fn on_group_update(&self, key: Key, length: u64) {
+        self.wakeup.hint(&[Link { key, length }]);
+        self.bump_soon();
+    }
+
+    /// `_drainBootHints`: hint the members that changed since the last drain,
+    /// reading their lengths straight from storage instead of opening cores.
+    async fn drain_boot_hints(&self, notify: &GroupNotify) -> Result<()> {
+        let since = self.lock_seeds().previous_drain;
+        let keys = notify.updates(since)?;
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let discovery_keys = keys
+            .iter()
+            .map(hypercore::crypto::discovery_key)
+            .collect::<Vec<_>>();
+        let infos = self.store.storage_infos(&discovery_keys)?;
+        let hints = keys
+            .iter()
+            .zip(infos)
+            .map(|(key, head)| Link {
+                key: *key,
+                length: head.map_or(0, |head| head.length),
+            })
+            .collect::<Vec<_>>();
+        self.wakeup.hint(&hints);
+        Ok(())
+    }
+
+    /// Keeps reading the group log for as long as the bee lives.
+    fn watch_group(&self, mut notify: GroupNotify) {
+        let Some(auto) = self
+            .weak_self
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .upgrade()
+        else {
+            return;
+        };
+        let weak = Arc::downgrade(&auto);
+        let handle = tokio::spawn(async move {
+            while let Some(update) = notify.next().await {
+                let Some(auto) = weak.upgrade() else { break };
+                auto.on_group_update(update.key, update.length);
+            }
+        });
+        *self.group_updates.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
     /// `update()`: bump and wait for the drain that consumes it.
@@ -1707,6 +1770,14 @@ impl Autobee {
         }
         if let Some(driver) = self.driver.lock().unwrap_or_else(|e| e.into_inner()).take() {
             driver.abort();
+        }
+        if let Some(group) = self
+            .group_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            group.abort();
         }
         if let Some(search) = self
             .ff_search
