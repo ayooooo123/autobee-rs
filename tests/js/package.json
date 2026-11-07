@@ -1,0 +1,13 @@
+{
+  "name": "autobee-rs-interop",
+  "private": true,
+  "description": "npm autobee-wakeup peer driven by tests/wakeup.rs",
+  "dependencies": {
+    "autobee-wakeup": "1.2.1",
+    "corestore": "7.16.1",
+    "hypercore": "11.40.3",
+    "hyperdht": "6.36.0",
+    "hyperswarm": "4.17.2",
+    "protomux-wakeup": "2.9.0"
+  }
+}

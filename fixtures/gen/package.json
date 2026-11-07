@@ -1,0 +1,16 @@
+{
+  "name": "autobee-rs-encryption-fixtures",
+  "private": true,
+  "description": "Generates ../encryption-reference.json from npm autobee",
+  "scripts": {
+    "gen:encoding": "node encoding.mjs"
+  },
+  "dependencies": {
+    "autobee": "2.12.1",
+    "b4a": "1.6.7",
+    "compact-encoding": "3.5.2",
+    "corestore": "7.16.1",
+    "hypercore": "11.40.3",
+    "sodium-native": "5.1.0"
+  }
+}

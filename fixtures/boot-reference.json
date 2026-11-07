@@ -1,0 +1,554 @@
+{
+ "schema": 1,
+ "scenarios": [
+  {
+   "name": "fresh-local",
+   "primaryKey": "4040404040404040404040404040404040404040404040404040404040404040",
+   "manifestVersion": 1,
+   "preset": [],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "883156165dec2153eae5e5f8589b0ade66850c9e282cc118586c75a862f5ff8f",
+    "localKey": "883156165dec2153eae5e5f8589b0ade66850c9e282cc118586c75a862f5ff8f",
+    "bootstrapKey": "883156165dec2153eae5e5f8589b0ade66850c9e282cc118586c75a862f5ff8f",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": null,
+     "autobee/local": "883156165dec2153eae5e5f8589b0ade66850c9e282cc118586c75a862f5ff8f",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": "883156165dec2153eae5e5f8589b0ade66850c9e282cc118586c75a862f5ff8f",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "remote-key",
+   "primaryKey": "4141414141414141414141414141414141414141414141414141414141414141",
+   "manifestVersion": 1,
+   "preset": [
+    {
+     "key": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+     "keyPairName": "bootstrap",
+     "userData": {}
+    }
+   ],
+   "boot": {
+    "key": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+    "localKey": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+    "bootstrapKey": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+     "autobee/local": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+     "autobee/local": "0c2c0b7cb9452e74ab8fa1386595e1c44c5abe3e0ee7694cdaadbd9dffc98883",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "local-pointer",
+   "primaryKey": "4242424242424242424242424242424242424242424242424242424242424242",
+   "manifestVersion": 1,
+   "preset": [
+    {
+     "key": "367780f44d23879ef8d9c9064b9973ba0f6da8e76295611125a3d2da84d829b1",
+     "keyPairName": "recorded-local",
+     "userData": {}
+    },
+    {
+     "key": "b29c6a40f665e47716443bd819b32576834b5db7cf7f2dd0d2f39caff20538f0",
+     "keyPairName": "bootstrap",
+     "userData": {
+      "autobee/local": "367780f44d23879ef8d9c9064b9973ba0f6da8e76295611125a3d2da84d829b1"
+     }
+    }
+   ],
+   "boot": {
+    "key": "b29c6a40f665e47716443bd819b32576834b5db7cf7f2dd0d2f39caff20538f0",
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "b29c6a40f665e47716443bd819b32576834b5db7cf7f2dd0d2f39caff20538f0",
+    "localKey": "367780f44d23879ef8d9c9064b9973ba0f6da8e76295611125a3d2da84d829b1",
+    "bootstrapKey": "b29c6a40f665e47716443bd819b32576834b5db7cf7f2dd0d2f39caff20538f0",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": "b29c6a40f665e47716443bd819b32576834b5db7cf7f2dd0d2f39caff20538f0",
+     "autobee/local": null,
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": "b29c6a40f665e47716443bd819b32576834b5db7cf7f2dd0d2f39caff20538f0",
+     "autobee/local": "367780f44d23879ef8d9c9064b9973ba0f6da8e76295611125a3d2da84d829b1",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "keypair-v1",
+   "primaryKey": "4343434343434343434343434343434343434343434343434343434343434343",
+   "manifestVersion": 1,
+   "preset": [],
+   "boot": {
+    "key": null,
+    "keyPairName": "fixture",
+    "keyPairPublicKey": "96f43b2e457f448e27575f93b86b27c82eacf7bd87d41fa668dfec70544cc62f",
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "fbbceb024d9c9646f2f20071473c831b40f00af833b4938fd5d002bdde5d90c2",
+    "localKey": "fbbceb024d9c9646f2f20071473c831b40f00af833b4938fd5d002bdde5d90c2",
+    "bootstrapKey": "fbbceb024d9c9646f2f20071473c831b40f00af833b4938fd5d002bdde5d90c2",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": "fbbceb024d9c9646f2f20071473c831b40f00af833b4938fd5d002bdde5d90c2",
+     "autobee/local": "fbbceb024d9c9646f2f20071473c831b40f00af833b4938fd5d002bdde5d90c2",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": "fbbceb024d9c9646f2f20071473c831b40f00af833b4938fd5d002bdde5d90c2",
+     "autobee/local": "fbbceb024d9c9646f2f20071473c831b40f00af833b4938fd5d002bdde5d90c2",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "keypair-v3",
+   "primaryKey": "4444444444444444444444444444444444444444444444444444444444444444",
+   "manifestVersion": 3,
+   "preset": [],
+   "boot": {
+    "key": null,
+    "keyPairName": "fixture",
+    "keyPairPublicKey": "b5660fcd3f1e5f572925d637fda07eeea20f9cc561e535b38e725a51d9f55404",
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "13b191305f2b503a6f1fb7f7881210d95ce3f2e85397b3bccdcb5ba73aff0e0e",
+    "localKey": "13b191305f2b503a6f1fb7f7881210d95ce3f2e85397b3bccdcb5ba73aff0e0e",
+    "bootstrapKey": "13b191305f2b503a6f1fb7f7881210d95ce3f2e85397b3bccdcb5ba73aff0e0e",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": "13b191305f2b503a6f1fb7f7881210d95ce3f2e85397b3bccdcb5ba73aff0e0e",
+     "autobee/local": "13b191305f2b503a6f1fb7f7881210d95ce3f2e85397b3bccdcb5ba73aff0e0e",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": "13b191305f2b503a6f1fb7f7881210d95ce3f2e85397b3bccdcb5ba73aff0e0e",
+     "autobee/local": "13b191305f2b503a6f1fb7f7881210d95ce3f2e85397b3bccdcb5ba73aff0e0e",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "encryption-key",
+   "primaryKey": "4545454545454545454545454545454545454545454545454545454545454545",
+   "manifestVersion": 1,
+   "preset": [],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": "0707070707070707070707070707070707070707070707070707070707070707",
+    "encrypt": false
+   },
+   "expect": {
+    "key": "76a0d16d8d80a4fbff5834874d0e6a8eb35487215168bf61649273a771d06b7f",
+    "localKey": "76a0d16d8d80a4fbff5834874d0e6a8eb35487215168bf61649273a771d06b7f",
+    "bootstrapKey": "76a0d16d8d80a4fbff5834874d0e6a8eb35487215168bf61649273a771d06b7f",
+    "encryptionKey": "0707070707070707070707070707070707070707070707070707070707070707",
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": null,
+     "autobee/local": "76a0d16d8d80a4fbff5834874d0e6a8eb35487215168bf61649273a771d06b7f",
+     "autobee/head": null,
+     "autobee/encryption": "0707070707070707070707070707070707070707070707070707070707070707",
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": "76a0d16d8d80a4fbff5834874d0e6a8eb35487215168bf61649273a771d06b7f",
+     "autobee/head": null,
+     "autobee/encryption": "0707070707070707070707070707070707070707070707070707070707070707",
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "encryption-generated",
+   "primaryKey": "4646464646464646464646464646464646464646464646464646464646464646",
+   "manifestVersion": 1,
+   "preset": [],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": true
+   },
+   "expect": {
+    "key": "081ab8d446b24fc708e2cb55564d303f55b94541c38b30fa40789f5615a4d452",
+    "localKey": "081ab8d446b24fc708e2cb55564d303f55b94541c38b30fa40789f5615a4d452",
+    "bootstrapKey": "081ab8d446b24fc708e2cb55564d303f55b94541c38b30fa40789f5615a4d452",
+    "encryptionKey": "9d77a43ce0d2843ab1d888aabf2c85879a408877f67f2cbf735f9958019c62f9",
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": null,
+     "autobee/local": "081ab8d446b24fc708e2cb55564d303f55b94541c38b30fa40789f5615a4d452",
+     "autobee/head": null,
+     "autobee/encryption": "9d77a43ce0d2843ab1d888aabf2c85879a408877f67f2cbf735f9958019c62f9",
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": "081ab8d446b24fc708e2cb55564d303f55b94541c38b30fa40789f5615a4d452",
+     "autobee/head": null,
+     "autobee/encryption": "9d77a43ce0d2843ab1d888aabf2c85879a408877f67f2cbf735f9958019c62f9",
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "encryption-stored",
+   "primaryKey": "4747474747474747474747474747474747474747474747474747474747474747",
+   "manifestVersion": 1,
+   "preset": [
+    {
+     "key": "06792bf1434e2b150b878e0c9425a237f7ab65791bca42a16045607eb2cad8b0",
+     "name": "local",
+     "userData": {
+      "autobee/encryption": "0909090909090909090909090909090909090909090909090909090909090909"
+     }
+    }
+   ],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "06792bf1434e2b150b878e0c9425a237f7ab65791bca42a16045607eb2cad8b0",
+    "localKey": "06792bf1434e2b150b878e0c9425a237f7ab65791bca42a16045607eb2cad8b0",
+    "bootstrapKey": "06792bf1434e2b150b878e0c9425a237f7ab65791bca42a16045607eb2cad8b0",
+    "encryptionKey": "0909090909090909090909090909090909090909090909090909090909090909",
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": null,
+     "autobee/local": "06792bf1434e2b150b878e0c9425a237f7ab65791bca42a16045607eb2cad8b0",
+     "autobee/head": null,
+     "autobee/encryption": "0909090909090909090909090909090909090909090909090909090909090909",
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": "06792bf1434e2b150b878e0c9425a237f7ab65791bca42a16045607eb2cad8b0",
+     "autobee/head": null,
+     "autobee/encryption": "0909090909090909090909090909090909090909090909090909090909090909",
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "previous-drain",
+   "primaryKey": "4848484848484848484848484848484848484848484848484848484848484848",
+   "manifestVersion": 1,
+   "preset": [
+    {
+     "key": "bb8af8db8821d9c1bd544c9075bc5ded64c8f6791c663e9a18ebac70583c5e13",
+     "name": "local",
+     "userData": {
+      "autobee/previous-drain": "fdd204"
+     }
+    }
+   ],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "bb8af8db8821d9c1bd544c9075bc5ded64c8f6791c663e9a18ebac70583c5e13",
+    "localKey": "bb8af8db8821d9c1bd544c9075bc5ded64c8f6791c663e9a18ebac70583c5e13",
+    "bootstrapKey": "bb8af8db8821d9c1bd544c9075bc5ded64c8f6791c663e9a18ebac70583c5e13",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 1234,
+    "localUserData": {
+     "referrer": null,
+     "autobee/local": "bb8af8db8821d9c1bd544c9075bc5ded64c8f6791c663e9a18ebac70583c5e13",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": "fdd204",
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": "bb8af8db8821d9c1bd544c9075bc5ded64c8f6791c663e9a18ebac70583c5e13",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": "fdd204",
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "system-head",
+   "primaryKey": "4949494949494949494949494949494949494949494949494949494949494949",
+   "manifestVersion": 1,
+   "preset": [
+    {
+     "key": "03d0547cb3bf9c40c61e1f8e2cc08c23ed436798d8a64c3fb70c47f52fe45d65",
+     "name": "local",
+     "userData": {
+      "autobee/head": "03030303030303030303030303030303030303030303030303030303030303032a"
+     }
+    }
+   ],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "03d0547cb3bf9c40c61e1f8e2cc08c23ed436798d8a64c3fb70c47f52fe45d65",
+    "localKey": "03d0547cb3bf9c40c61e1f8e2cc08c23ed436798d8a64c3fb70c47f52fe45d65",
+    "bootstrapKey": "03d0547cb3bf9c40c61e1f8e2cc08c23ed436798d8a64c3fb70c47f52fe45d65",
+    "encryptionKey": null,
+    "system": {
+     "key": "0303030303030303030303030303030303030303030303030303030303030303",
+     "length": 42
+    },
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": null,
+     "autobee/local": "03d0547cb3bf9c40c61e1f8e2cc08c23ed436798d8a64c3fb70c47f52fe45d65",
+     "autobee/head": "03030303030303030303030303030303030303030303030303030303030303032a",
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": "03d0547cb3bf9c40c61e1f8e2cc08c23ed436798d8a64c3fb70c47f52fe45d65",
+     "autobee/head": "03030303030303030303030303030303030303030303030303030303030303032a",
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "legacy-autobase",
+   "primaryKey": "4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a",
+   "manifestVersion": 1,
+   "preset": [
+    {
+     "key": "ec1f80c57c1ef9f961823e17de2989b3a6e954278adc77ccb3b0fa94701c60b2",
+     "name": "local",
+     "userData": {
+      "autobase/boot": "0102"
+     }
+    }
+   ],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "error": "Out of bounds"
+  },
+  {
+   "name": "referrer",
+   "primaryKey": "4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b",
+   "manifestVersion": 1,
+   "preset": [
+    {
+     "key": "05486f6505a5923136acb27835fae3e88e9feea5bedcced18ed48c8f8c338ed7",
+     "keyPairName": "bootstrap",
+     "userData": {}
+    },
+    {
+     "key": "9f29ddaa7efa522ec4cbafca63db6a220fb9581bb769497b6765db6334ac64a2",
+     "name": "local",
+     "userData": {
+      "referrer": "05486f6505a5923136acb27835fae3e88e9feea5bedcced18ed48c8f8c338ed7"
+     }
+    }
+   ],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "05486f6505a5923136acb27835fae3e88e9feea5bedcced18ed48c8f8c338ed7",
+    "localKey": "9f29ddaa7efa522ec4cbafca63db6a220fb9581bb769497b6765db6334ac64a2",
+    "bootstrapKey": "05486f6505a5923136acb27835fae3e88e9feea5bedcced18ed48c8f8c338ed7",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": "05486f6505a5923136acb27835fae3e88e9feea5bedcced18ed48c8f8c338ed7",
+     "autobee/local": null,
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": null,
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  },
+  {
+   "name": "reboot",
+   "primaryKey": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+   "manifestVersion": 1,
+   "preset": [],
+   "boot": {
+    "key": null,
+    "keyPairName": null,
+    "keyPairPublicKey": null,
+    "encryptionKey": null,
+    "encrypt": false
+   },
+   "expect": {
+    "key": "8cfcd5980524484a962b07b7e3f087f4fa6e415c62f3d36f080eddd8b15a1ff5",
+    "localKey": "8cfcd5980524484a962b07b7e3f087f4fa6e415c62f3d36f080eddd8b15a1ff5",
+    "bootstrapKey": "8cfcd5980524484a962b07b7e3f087f4fa6e415c62f3d36f080eddd8b15a1ff5",
+    "encryptionKey": null,
+    "system": null,
+    "previousDrain": 0,
+    "localUserData": {
+     "referrer": null,
+     "autobee/local": "8cfcd5980524484a962b07b7e3f087f4fa6e415c62f3d36f080eddd8b15a1ff5",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    },
+    "bootstrapUserData": {
+     "referrer": null,
+     "autobee/local": "8cfcd5980524484a962b07b7e3f087f4fa6e415c62f3d36f080eddd8b15a1ff5",
+     "autobee/head": null,
+     "autobee/encryption": null,
+     "autobee/previous-drain": null,
+     "autobase/local": null,
+     "autobase/boot": null
+    }
+   }
+  }
+ ]
+}

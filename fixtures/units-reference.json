@@ -1,0 +1,799 @@
+{
+ "schema": 1,
+ "triggers": {
+  "steps": [
+   {
+    "op": {
+     "add": {
+      "writer": "w1",
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 1
+     }
+    },
+    "entry": {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "index": 0,
+     "length": 1
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 1
+     }
+    }
+   },
+   {
+    "op": {
+     "add": {
+      "writer": "w1",
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 2
+     }
+    },
+    "entry": {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "index": 0,
+     "length": 2
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 2
+     }
+    }
+   },
+   {
+    "op": {
+     "add": {
+      "writer": "w2",
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 1
+     }
+    },
+    "entry": {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "index": 1,
+     "length": 1
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 2
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 1
+     }
+    }
+   },
+   {
+    "op": {
+     "add": {
+      "writer": "w1",
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "length": 5
+     }
+    },
+    "entry": {
+     "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "index": 0,
+     "length": 5
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 5
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 1
+     }
+    }
+   },
+   {
+    "op": {
+     "trigger": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 0
+     }
+    },
+    "entry": {
+     "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "index": 0,
+     "length": 5
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 5
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 1
+     }
+    }
+   },
+   {
+    "op": {
+     "trigger": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 1
+     }
+    },
+    "entry": {
+     "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "index": 0,
+     "length": 5
+    },
+    "bumps": [
+     "w2"
+    ],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 5
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 1
+     }
+    }
+   },
+   {
+    "op": {
+     "add": {
+      "writer": "w3",
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "length": 3
+     }
+    },
+    "entry": {
+     "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+     "index": 0,
+     "length": 3
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 5
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 1
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "add": {
+      "writer": "w1",
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 4
+     }
+    },
+    "entry": {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "index": 0,
+     "length": 4
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 4
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 1
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "add": {
+      "writer": "w2",
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 2
+     }
+    },
+    "entry": {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "index": 1,
+     "length": 2
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 4
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 2
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "trigger": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "length": 2
+     }
+    },
+    "entry": {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "index": 1,
+     "length": 2
+    },
+    "bumps": [
+     "w2"
+    ],
+    "waiting": {
+     "w1": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 4
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 2
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "trigger": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "length": 5
+     }
+    },
+    "entry": {
+     "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "index": 1,
+     "length": 2
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 0,
+      "length": 4
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 2
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "add": {
+      "writer": "w1",
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "length": 6
+     }
+    },
+    "entry": {
+     "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "index": 0,
+     "length": 6
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 6
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 2
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "remove": {
+      "writer": "w1"
+     }
+    },
+    "entry": {
+     "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "index": 0,
+     "length": 6
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 6
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 2
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "remove": {
+      "writer": "w1"
+     }
+    },
+    "entry": {
+     "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "index": 0,
+     "length": 6
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 6
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 2
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   },
+   {
+    "op": {
+     "trigger": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "length": 10
+     }
+    },
+    "entry": {
+     "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "index": 0,
+     "length": 6
+    },
+    "bumps": [],
+    "waiting": {
+     "w1": {
+      "id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "index": 0,
+      "length": 6
+     },
+     "w2": {
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "index": 1,
+      "length": 2
+     },
+     "w3": {
+      "id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "index": 0,
+      "length": 3
+     }
+    }
+   }
+  ]
+ },
+ "trusted": {
+  "genesis": {
+   "isGenesis": true,
+   "key": "0101010101010101010101010101010101010101010101010101010101010101",
+   "indexers": [
+    "0202020202020202020202020202020202020202020202020202020202020202"
+   ]
+  },
+  "steps": [
+   {
+    "kind": "isTrusted",
+    "label": "genesis",
+    "key": "0101010101010101010101010101010101010101010101010101010101010101",
+    "result": true,
+    "hookCalls": 0,
+    "calls": 0
+   },
+   {
+    "kind": "isTrusted",
+    "label": "indexer",
+    "key": "0202020202020202020202020202020202020202020202020202020202020202",
+    "result": true,
+    "hookCalls": 0,
+    "calls": 0
+   },
+   {
+    "kind": "isTrusted",
+    "label": "yes",
+    "key": "0303030303030303030303030303030303030303030303030303030303030303",
+    "result": true,
+    "hookCalls": 1,
+    "calls": 1
+   },
+   {
+    "kind": "isTrusted",
+    "label": "yes-cached",
+    "key": "0303030303030303030303030303030303030303030303030303030303030303",
+    "result": true,
+    "hookCalls": 0,
+    "calls": 1
+   },
+   {
+    "kind": "isTrusted",
+    "label": "no",
+    "key": "0404040404040404040404040404040404040404040404040404040404040404",
+    "result": false,
+    "hookCalls": 1,
+    "calls": 2
+   },
+   {
+    "kind": "isTrusted",
+    "label": "no-again",
+    "key": "0404040404040404040404040404040404040404040404040404040404040404",
+    "result": false,
+    "hookCalls": 1,
+    "calls": 3
+   },
+   {
+    "kind": "concurrent",
+    "key": "0505050505050505050505050505050505050505050505050505050505050505",
+    "results": [
+     true,
+     true
+    ],
+    "hookCalls": 1,
+    "calls": 4
+   },
+   {
+    "kind": "clear"
+   },
+   {
+    "kind": "isTrusted",
+    "label": "after-clear",
+    "key": "0303030303030303030303030303030303030303030303030303030303030303",
+    "result": true,
+    "hookCalls": 1,
+    "calls": 5
+   },
+   {
+    "kind": "mostRecentTrusted",
+    "result": null
+   },
+   {
+    "kind": "read",
+    "input": true,
+    "result": true
+   },
+   {
+    "kind": "read",
+    "input": false,
+    "result": null
+   },
+   {
+    "kind": "read",
+    "input": null,
+    "result": null
+   },
+   {
+    "kind": "bare",
+    "key": "0606060606060606060606060606060606060606060606060606060606060606",
+    "result": true
+   },
+   {
+    "kind": "mostRecentTrustedHook",
+    "result": {
+     "key": "0707070707070707070707070707070707070707070707070707070707070707",
+     "length": 9
+    }
+   }
+  ]
+ },
+ "updates": {
+  "scenarios": [
+   {
+    "name": "incremental",
+    "track": {
+     "view": {
+      "key": "0101010101010101010101010101010101010101010101010101010101010101",
+      "length": 4
+     },
+     "system": {
+      "key": "0202020202020202020202020202020202020202020202020202020202020202",
+      "length": 3
+     },
+     "flushes": 10
+    },
+    "finalise": {
+     "view": {
+      "key": "0101010101010101010101010101010101010101010101010101010101010101",
+      "length": 9
+     },
+     "system": {
+      "key": "0202020202020202020202020202020202020202020202020202020202020202",
+      "length": 3
+     },
+     "flushes": 12,
+     "fastForward": false
+    },
+    "expect": {
+     "view": {
+      "flushes": 12,
+      "from": {
+       "key": "0101010101010101010101010101010101010101010101010101010101010101",
+       "length": 4
+      },
+      "to": {
+       "key": "0101010101010101010101010101010101010101010101010101010101010101",
+       "length": 9
+      },
+      "incremental": true
+     },
+     "system": {
+      "flushes": 12,
+      "from": {
+       "key": "0202020202020202020202020202020202020202020202020202020202020202",
+       "length": 3
+      },
+      "to": {
+       "key": "0202020202020202020202020202020202020202020202020202020202020202",
+       "length": 3
+      },
+      "incremental": true
+     }
+    }
+   },
+   {
+    "name": "fast-forward",
+    "track": {
+     "view": {
+      "key": "0101010101010101010101010101010101010101010101010101010101010101",
+      "length": 4
+     },
+     "system": {
+      "key": "0202020202020202020202020202020202020202020202020202020202020202",
+      "length": 3
+     },
+     "flushes": 10
+    },
+    "finalise": {
+     "view": {
+      "key": "0303030303030303030303030303030303030303030303030303030303030303",
+      "length": 7
+     },
+     "system": {
+      "key": "0404040404040404040404040404040404040404040404040404040404040404",
+      "length": 8
+     },
+     "flushes": 11,
+     "fastForward": true
+    },
+    "expect": {
+     "view": {
+      "flushes": 11,
+      "from": {
+       "key": "0101010101010101010101010101010101010101010101010101010101010101",
+       "length": 4
+      },
+      "to": {
+       "key": "0303030303030303030303030303030303030303030303030303030303030303",
+       "length": 7
+      },
+      "incremental": false
+     },
+     "system": {
+      "flushes": 11,
+      "from": {
+       "key": "0202020202020202020202020202020202020202020202020202020202020202",
+       "length": 3
+      },
+      "to": {
+       "key": "0404040404040404040404040404040404040404040404040404040404040404",
+       "length": 8
+      },
+      "incremental": false
+     }
+    }
+   },
+   {
+    "name": "untracked",
+    "track": null,
+    "finalise": {
+     "view": {
+      "key": "0101010101010101010101010101010101010101010101010101010101010101",
+      "length": 2
+     },
+     "system": {
+      "key": "0202020202020202020202020202020202020202020202020202020202020202",
+      "length": 2
+     },
+     "flushes": 1,
+     "fastForward": false
+    },
+    "expect": {
+     "view": null,
+     "system": null
+    }
+   }
+  ]
+ },
+ "applyCalls": {
+  "steps": [
+   {
+    "op": "addWriter-default",
+    "calls": [
+     {
+      "method": "addWriter",
+      "key": "3131313131313131313131313131313131313131313131313131313131313131",
+      "opts": {
+       "weight": 2,
+       "isGenesis": true,
+       "coord": null,
+       "carrier": -1
+      }
+     }
+    ]
+   },
+   {
+    "op": "addWriter-writer",
+    "calls": [
+     {
+      "method": "addWriter",
+      "key": "3232323232323232323232323232323232323232323232323232323232323232",
+      "opts": {
+       "weight": 1,
+       "isGenesis": true,
+       "coord": null,
+       "carrier": -1
+      }
+     }
+    ]
+   },
+   {
+    "op": "addWriter-weight",
+    "calls": [
+     {
+      "method": "addWriter",
+      "key": "3333333333333333333333333333333333333333333333333333333333333333",
+      "opts": {
+       "weight": 5,
+       "isGenesis": true,
+       "coord": null,
+       "carrier": -1
+      }
+     }
+    ]
+   },
+   {
+    "op": "removeWriter",
+    "calls": [
+     {
+      "method": "removeWriter",
+      "key": "3232323232323232323232323232323232323232323232323232323232323232"
+     }
+    ]
+   },
+   {
+    "op": "addWriter-id",
+    "calls": [
+     {
+      "method": "addWriter",
+      "key": "3434343434343434343434343434343434343434343434343434343434343434",
+      "opts": {
+       "weight": 2,
+       "isGenesis": true,
+       "coord": null,
+       "carrier": -1
+      }
+     }
+    ]
+   },
+   {
+    "op": "addWriter-invalid",
+    "error": "Invalid Hypercore key"
+   },
+   {
+    "op": "removeWriter-invalid",
+    "error": "Invalid Hypercore key"
+   },
+   {
+    "op": "addWriter-applying",
+    "calls": [
+     {
+      "method": "addWriter",
+      "key": "3535353535353535353535353535353535353535353535353535353535353535",
+      "opts": {
+       "weight": 2,
+       "isGenesis": false,
+       "coord": {
+        "key": "3535353535353535353535353535353535353535353535353535353535353535",
+        "length": 3
+       },
+       "carrier": 4
+      }
+     }
+    ]
+   },
+   {
+    "op": "interrupt",
+    "calls": [
+     {
+      "method": "interrupt",
+      "reason": "stop"
+     }
+    ]
+   },
+   {
+    "op": "accessors",
+    "id": "id-1",
+    "key": "1111111111111111111111111111111111111111111111111111111111111111",
+    "discoveryKey": "2222222222222222222222222222222222222222222222222222222222222222",
+    "name": "test-name",
+    "clock": 7,
+    "genesis": true,
+    "removeable": true
+   }
+  ]
+ }
+}

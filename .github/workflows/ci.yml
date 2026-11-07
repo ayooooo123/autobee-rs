@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: autobee-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: autobee-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/compact-encoding-rs
+          path: compact-encoding-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/protomux-rs
+          path: protomux-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/protomux-wakeup-rs
+          path: protomux-wakeup-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hyperschema-rs
+          path: hyperschema-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypercore-id-encoding-rs
+          path: hypercore-id-encoding-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypercore-storage-rs
+          path: hypercore-storage-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hypercore-rs
+          path: hypercore-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/corestore-rs
+          path: corestore-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/hyperbee-rs
+          path: hyperbee-rs
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: for d in tests/js fixtures/gen; do [ -f $d/package.json ] && (cd $d && npm ci); done; true
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test -- --include-ignored

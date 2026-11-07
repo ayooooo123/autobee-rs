@@ -1,0 +1,45 @@
+[package]
+name = "autobee-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+description = "Autobee (multi-writer hyperbee2 views over hypercores) for Rust, wire- and byte-compatible with npm autobee"
+keywords = ["autobee", "autobase", "hypercore", "p2p", "holepunch"]
+categories = ["network-programming"]
+
+[lib]
+name = "autobee"
+
+[dependencies]
+blake2b_simd = "1"
+bytes = "1"
+compact-encoding-rs = { path = "../compact-encoding-rs" }
+corestore-rs = { path = "../corestore-rs" }
+hyperbee-rs = { path = "../hyperbee-rs" }
+hypercore-id-encoding-rs = { path = "../hypercore-id-encoding-rs" }
+hypercore-rs = { path = "../hypercore-rs" }
+protomux-rs = { path = "../protomux-rs" }
+protomux-wakeup-rs = { path = "../protomux-wakeup-rs" }
+salsa20 = "0.10"
+siphasher = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[build-dependencies]
+hyperschema-rs = { path = "../hyperschema-rs" }
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+corestore-rs = { path = "../corestore-rs" }
+hypercore-id-encoding-rs = { path = "../hypercore-id-encoding-rs" }
+peeroxide = "1.7.4"
+peeroxide-dht = "1.7.4"
+tempfile = "3"
+tokio = { version = "1", features = [ "io-util", "macros", "process", "rt-multi-thread", "time"] }
+
+# Our fork: UDX write pipelining, C-compatible pacing and SACKs (see ../peeroxide).
+[patch.crates-io]
+peeroxide = { path = "../peeroxide/peeroxide" }
+peeroxide-dht = { path = "../peeroxide/peeroxide-dht" }
+libudx = { path = "../peeroxide/libudx" }
