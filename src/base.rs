@@ -2144,6 +2144,9 @@ impl crate::apply_calls::Auto for Autobee {
 
     fn remove_writer<'a>(&'a self, key: Key) -> crate::apply_calls::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // `apply-calls.js` forgets first: a writer removed here must not stay trusted for fast-forward,
+            // and the forget holds even if the system write fails.
+            self.trusted.forget(&key);
             self.system.lock().await.remove_writer(key, 0).await?;
             Ok(())
         })
