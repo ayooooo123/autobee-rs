@@ -68,23 +68,28 @@ impl TrustedPeers {
             pending.entry(*key).or_default().clone()
         };
 
-        // the reference shares the in-flight promise; the cell does the same
-        let trusted = *cell
-            .get_or_init(|| self.hooks.is_trusted(key, reference))
-            .await;
-
-        // The verdict holds only if nothing forgot this key while the hook ran: a writer removed (or an
-        // undo) meanwhile must not be trusted by this answer, nor by callers sharing it.
-        let mut pending = lock(&self.pending);
-        if !pending.get(key).is_some_and(|entry| Arc::ptr_eq(entry, &cell)) {
-            return false;
-        }
-        pending.remove(key);
-        if trusted {
-            // under the pending lock, so a `forget` racing this verdict cannot cache it after clearing.
-            lock(&self.trusted).insert(*key, true);
-        }
-        trusted
+        // The reference shares the in-flight promise; the cell does the same. The verdict is settled once, inside
+        // the cell, so every caller sharing it gets the same answer: it holds only if nothing forgot this key while
+        // the hook ran (a writer removed, or an undo), and only then is it cached.
+        let settle = cell.clone();
+        *cell
+            .get_or_init(|| async move {
+                let trusted = self.hooks.is_trusted(key, reference).await;
+                let mut pending = lock(&self.pending);
+                if !pending
+                    .get(key)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &settle))
+                {
+                    return false;
+                }
+                pending.remove(key);
+                if trusted {
+                    // under the pending lock, so a `forget` racing this verdict cannot cache it after clearing.
+                    lock(&self.trusted).insert(*key, true);
+                }
+                trusted
+            })
+            .await
     }
 
     /// `trusted.read(trusted)`: `trusted || null`.
@@ -166,7 +171,11 @@ mod tests {
             Box::pin(async {})
         }
 
-        fn is_trusted<'a>(&'a self, _key: &'a Key, _reference: Option<&'a Bee>) -> BoxFuture<'a, bool> {
+        fn is_trusted<'a>(
+            &'a self,
+            _key: &'a Key,
+            _reference: Option<&'a Bee>,
+        ) -> BoxFuture<'a, bool> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             Box::pin(async move {
                 let gate = lock(&self.gate).clone();
@@ -235,12 +244,13 @@ mod tests {
             let peers = peers.clone();
             tokio::spawn(async move { peers.is_trusted(&KEY, None, genesis(&bootstrap)).await })
         };
-        // both callers share the one pending cell: the map, this clone, then each caller's
+        // both callers share the one pending cell: the map, this clone, the first caller's and the clone its
+        // running hook settles against, then the second caller's
         let cell = {
             let pending = lock(&peers.pending);
             pending.get(&KEY).expect("pending entry").clone()
         };
-        while Arc::strong_count(&cell) < 4 {
+        while Arc::strong_count(&cell) < 5 {
             tokio::task::yield_now().await;
         }
 
@@ -255,5 +265,37 @@ mod tests {
         assert_eq!(hook.calls(), 2);
         assert!(peers.is_trusted(&KEY, None, genesis(&bootstrap)).await);
         assert_eq!(hook.calls(), 2, "a fresh truthy answer is cached");
+    }
+
+    /// Two callers sharing one answer that nothing forgot both get it, from one hook call.
+    #[tokio::test]
+    async fn callers_sharing_an_answer_get_the_same_verdict() {
+        let hook = Hook::new(true, true);
+        let peers = Arc::new(TrustedPeers::new(hook.clone()));
+        let bootstrap = OTHER;
+
+        let first = {
+            let peers = peers.clone();
+            tokio::spawn(async move { peers.is_trusted(&KEY, None, genesis(&bootstrap)).await })
+        };
+        while hook.calls() == 0 {
+            tokio::task::yield_now().await;
+        }
+        let second = {
+            let peers = peers.clone();
+            tokio::spawn(async move { peers.is_trusted(&KEY, None, genesis(&bootstrap)).await })
+        };
+        // let the second caller reach the shared answer (this test runs on one thread)
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        hook.release.send(true).expect("release");
+        assert!(first.await.expect("first"), "the caller that ran the hook");
+        assert!(
+            second.await.expect("second"),
+            "the caller sharing its answer"
+        );
+        assert_eq!(hook.calls(), 1, "one shared hook call");
     }
 }
