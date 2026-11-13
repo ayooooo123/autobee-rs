@@ -456,14 +456,13 @@ impl FastForward {
         let Some(head) = bee_head(self.head) else {
             return Ok(None);
         };
-        // the reference passes `{ timeout }` to every system read: a peer that
-        // serves the oplog head but stalls its system core must not wedge the
-        // search (and, before, the drain behind it)
-        let timeout = Duration::from_millis(self.timeout);
-        match tokio::time::timeout(timeout, self.system.boot(head)).await {
-            Ok(result) => result.map_err(|_| ())?,
-            Err(_) => return Err(()),
-        }
+        // the reference passes `{ timeout }` to every system read, bounding each
+        // block read: a peer that serves the oplog head but stalls its system
+        // core must not wedge the search (and, before, the drain behind it). A
+        // whole boot walks several blocks, so one budget for all of it failed
+        // every fast-forward whose boot took longer than a single read may.
+        let timeout = Some(Duration::from_millis(self.timeout));
+        self.system.boot(head, timeout).await.map_err(|_| ())?;
 
         if self.system.version <= LEGACY_AUTOBASE_VERSION && !self.run_legacy(host).await {
             return Ok(None);
@@ -473,10 +472,10 @@ impl FastForward {
 
         // ensure local key is locally available always
         let local = host.local_key();
-        match tokio::time::timeout(timeout, self.system.get(&local, false)).await {
-            Ok(result) => result.map_err(|_| ())?,
-            Err(_) => return Err(()),
-        };
+        self.system
+            .get(&local, false, timeout)
+            .await
+            .map_err(|_| ())?;
 
         // a legacy system without the designated view migrates onto an empty view
         let mut view = None;
@@ -485,7 +484,7 @@ impl FastForward {
         {
             self.cores.push(core.clone());
             let opts = GetOptions {
-                timeout: Some(Duration::from_millis(self.timeout)),
+                timeout,
                 bag: Some(self.active_requests.clone()),
                 ..Default::default()
             };
@@ -495,10 +494,10 @@ impl FastForward {
         }
 
         for head in self.system.heads.clone() {
-            match tokio::time::timeout(timeout, self.system.get(&head.key, false)).await {
-                Ok(result) => result.map_err(|_| ())?,
-                Err(_) => return Err(()),
-            };
+            self.system
+                .get(&head.key, false, timeout)
+                .await
+                .map_err(|_| ())?;
         }
 
         if let Some(warmup) = self.warmup.take() {
@@ -576,13 +575,14 @@ impl FastForward {
         let Some((head, autobee)) = self.resolve_legacy(host).await else {
             return false;
         };
+        let timeout = Some(Duration::from_millis(self.timeout));
 
         if let Some(autobee) = autobee
             && let Some(views) = autobee.views.as_ref()
         {
             self.head = batch_to_head(views.system.key, views.system.start, views.system.length);
             if let Some(head) = bee_head(self.head)
-                && self.system.boot(head).await.is_ok()
+                && self.system.boot(head, timeout).await.is_ok()
                 && self.system.version > LEGACY_AUTOBASE_VERSION
             {
                 return true;
@@ -591,7 +591,7 @@ impl FastForward {
 
         self.head = head;
         match bee_head(self.head) {
-            Some(head) => self.system.boot(head).await.is_ok(),
+            Some(head) => self.system.boot(head, timeout).await.is_ok(),
             None => false,
         }
     }

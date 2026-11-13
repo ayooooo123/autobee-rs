@@ -699,7 +699,7 @@ async fn replays_the_recorded_landing() {
     );
     assert_eq!(chosen.system.flushes, 25);
 
-    let system_info = info(chosen.system.get_info().await.unwrap().unwrap());
+    let system_info = info(chosen.system.get_info(None).await.unwrap().unwrap());
     assert_eq!(
         system_info.flushes,
         landing["info"]["flushes"].as_u64().unwrap()

@@ -902,7 +902,7 @@ impl Writer {
         system: &crate::system::SystemBee,
         bootstrap: &Key,
     ) -> hyperbee::Result<u64> {
-        let info = system.get(self.core.key(), false).await?;
+        let info = system.get(self.core.key(), false, None).await?;
         let length = info.as_ref().map_or(0, |info| info.length);
         self.is_head = self.core.length() > 0
             && if system.heads.is_empty() {

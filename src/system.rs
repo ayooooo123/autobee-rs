@@ -7,7 +7,8 @@ use crate::order_hash::advance_hash;
 use crate::promotions::{Operation, Promotions};
 use crate::types::Node;
 use bytes::Bytes;
-use hyperbee::{Bee, Error, Head, RangeOptions, Result};
+use hyperbee::{Bee, Error, Head, RangeOptions, ReadOptions, Result};
+use std::time::Duration;
 
 const INFO_KEY: &[u8] = &[0];
 const LEGACY_INFO_KEY: &[u8] = b"\0\0info";
@@ -84,7 +85,7 @@ pub struct SystemSnapshot {
 }
 impl SystemSnapshot {
     pub async fn get(&self, key: &[u8; 32]) -> Result<Option<WriterInfo>> {
-        read_writer(&self.bee, key).await
+        read_writer(&self.bee, key, None).await
     }
     pub async fn has(&self, link: &Link) -> Result<bool> {
         Ok(self
@@ -140,17 +141,26 @@ impl SystemBee {
             .collect()
     }
 
-    pub async fn get_info(&self) -> Result<Option<SystemInfoValue>> {
-        let mut node = self.bee.get(INFO_KEY).await?;
+    /// `getInfo({ timeout })`: `timeout` bounds each block read, as the reference's Hyperbee
+    /// `get` does, not the whole lookup.
+    pub async fn get_info(&self, timeout: Option<Duration>) -> Result<Option<SystemInfoValue>> {
+        let mut node = self
+            .bee
+            .get_with_options(INFO_KEY, read_options(timeout))
+            .await?;
         if node.is_none() {
-            node = self.bee.get(LEGACY_INFO_KEY).await?;
+            node = self
+                .bee
+                .get_with_options(LEGACY_INFO_KEY, read_options(timeout))
+                .await?;
         }
         node.map(|n| encoding::decode_system_info(n.value).map_err(Into::into))
             .transpose()
     }
 
-    pub async fn reset(&mut self) -> Result<()> {
-        let info = self.get_info().await?;
+    /// `reset({ timeout })`.
+    pub async fn reset(&mut self, timeout: Option<Duration>) -> Result<()> {
+        let info = self.get_info(timeout).await?;
         match info {
             None => {
                 self.version = 0;
@@ -185,13 +195,14 @@ impl SystemBee {
         Ok(())
     }
 
-    pub async fn boot(&mut self, head: Head) -> Result<()> {
+    /// `boot(view, { timeout })`.
+    pub async fn boot(&mut self, head: Head, timeout: Option<Duration>) -> Result<()> {
         self.bee.move_to(head).await?;
-        self.reset().await
+        self.reset(timeout).await
     }
     pub async fn undo(&mut self, head: Head) -> Result<Option<Head>> {
         self.bee.move_to(head).await?;
-        self.reset().await?;
+        self.reset(None).await?;
         Ok(self.view)
     }
     pub async fn snapshot(&self, head: Option<Head>) -> Result<SystemSnapshot> {
@@ -232,8 +243,14 @@ impl SystemBee {
         Ok(())
     }
 
-    pub async fn get(&self, key: &[u8; 32], unflushed: bool) -> Result<Option<WriterInfo>> {
-        let mut info = read_writer(&self.bee, key).await?;
+    /// `get(key, { unflushed, timeout })`.
+    pub async fn get(
+        &self,
+        key: &[u8; 32],
+        unflushed: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Option<WriterInfo>> {
+        let mut info = read_writer(&self.bee, key, timeout).await?;
         if !unflushed {
             return Ok(info);
         }
@@ -273,7 +290,7 @@ impl SystemBee {
             return Ok(h.length >= link.length);
         }
         Ok(self
-            .get(&link.key, false)
+            .get(&link.key, false, None)
             .await?
             .is_some_and(|w| w.length >= link.length))
     }
@@ -296,11 +313,14 @@ impl SystemBee {
         if let Some((_, added)) = self.writers.iter().find(|(k, _)| k == key) {
             return Ok(*added);
         }
-        Ok(self.get(key, false).await?.is_some_and(|v| !v.is_removed))
+        Ok(self
+            .get(key, false, None)
+            .await?
+            .is_some_and(|v| !v.is_removed))
     }
 
     pub async fn add_writer(&mut self, key: [u8; 32], opts: AddWriterOptions) -> Result<()> {
-        let info = self.get(&key, true).await?;
+        let info = self.get(&key, true, None).await?;
         let length = if opts.length == 0 {
             info.as_ref().map_or(0, |w| w.length)
         } else {
@@ -349,7 +369,7 @@ impl SystemBee {
         Ok(())
     }
     pub async fn ack_writer(&mut self, key: [u8; 32], length: u64) -> Result<()> {
-        let info = self.get(&key, true).await?;
+        let info = self.get(&key, true, None).await?;
         let granted = self
             .writers
             .iter()
@@ -369,7 +389,7 @@ impl SystemBee {
     pub async fn remove_writer(&mut self, key: [u8; 32], length: u64) -> Result<()> {
         let mut upd = WriterUpdate::new(key);
         upd.length = if length == 0 {
-            self.get(&key, true).await?.map_or(0, |w| w.length)
+            self.get(&key, true, None).await?.map_or(0, |w| w.length)
         } else {
             length
         };
@@ -442,7 +462,7 @@ impl SystemBee {
         let mut ops = Vec::new();
         let mut grants = Vec::new();
         for upd in &self.updates {
-            let previous = read_writer(&self.bee, &upd.key).await?;
+            let previous = read_writer(&self.bee, &upd.key, None).await?;
             let is_oplog = upd.key == last.key;
             let writer = SystemWriterV5 {
                 is_removed: if upd.is_removed {
@@ -525,11 +545,26 @@ impl SystemBee {
     }
 }
 
-async fn read_writer(bee: &Bee, key: &[u8; 32]) -> Result<Option<WriterInfo>> {
-    bee.get(&encoding::encode_system_writer_key(key))
-        .await?
-        .map(|e| decode_writer(&e.key, e.value))
-        .transpose()
+/// Hyperbee read options bounding each block read by `timeout`.
+fn read_options(timeout: Option<Duration>) -> ReadOptions {
+    ReadOptions {
+        timeout,
+        ..ReadOptions::default()
+    }
+}
+
+async fn read_writer(
+    bee: &Bee,
+    key: &[u8; 32],
+    timeout: Option<Duration>,
+) -> Result<Option<WriterInfo>> {
+    bee.get_with_options(
+        &encoding::encode_system_writer_key(key),
+        read_options(timeout),
+    )
+    .await?
+    .map(|e| decode_writer(&e.key, e.value))
+    .transpose()
 }
 pub(crate) fn decode_writer(key: &[u8], value: Bytes) -> Result<WriterInfo> {
     let decoded = encoding::decode_system_writer(key, value)?;

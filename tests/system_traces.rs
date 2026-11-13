@@ -255,7 +255,7 @@ async fn replay_peer(
                 "operation kind {i}"
             );
         }
-        let info = match system.get_info().await.unwrap().unwrap() {
+        let info = match system.get_info(None).await.unwrap().unwrap() {
             SystemInfoValue::V3(v) => v,
             _ => panic!("unexpected info version"),
         };
@@ -317,7 +317,7 @@ async fn replay_peer(
         events[0]["info"]["hash"].as_str().map(str::to_owned)
     );
     assert_eq!(snapshot.get(&writer).await.unwrap(), latest_writer);
-    system.boot(last_head).await.unwrap();
+    system.boot(last_head, None).await.unwrap();
     assert_eq!(system.hash, last_hash);
 }
 fn is_single_core_history(events: &[&Value]) -> bool {

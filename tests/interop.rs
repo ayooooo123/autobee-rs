@@ -229,7 +229,7 @@ impl RustPeer {
     async fn state(&self) -> Value {
         let (info, heads, system_head) = {
             let system = self.auto.system.lock().await;
-            let info = system.get_info().await.unwrap();
+            let info = system.get_info(None).await.unwrap();
             (info, system.heads.clone(), system.bee.head())
         };
         let info = match info {

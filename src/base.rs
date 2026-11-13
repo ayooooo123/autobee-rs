@@ -300,7 +300,7 @@ impl Autobee {
                 length: head.length,
             },
         );
-        system.boot(system_head).await?;
+        system.boot(system_head, None).await?;
 
         let bee = Bee::from_session(&view_store, view_core).await?;
         let view_head = system.view.unwrap_or(BeeHead {
@@ -668,7 +668,7 @@ impl Autobee {
         for link in hints {
             let known = {
                 let system = self.system.lock().await;
-                system.get(&link.key, false).await?
+                system.get(&link.key, false, None).await?
             };
             // `_filterTracked`: a zero length always passes through and
             // re-activates the writer; a known length only skips a hint at or
@@ -950,7 +950,7 @@ impl Autobee {
                     length: to.length,
                 })
                 .await?;
-            system.reset().await?;
+            system.reset(None).await?;
             self.flushes.store(system.flushes, Ordering::Release);
             self.genesis.store(system.is_genesis(), Ordering::Release);
         }
@@ -1593,7 +1593,7 @@ impl Autobee {
 
         let witness = {
             let system = self.system.lock().await;
-            let record = system.get(&self.local_key, false).await?;
+            let record = system.get(&self.local_key, false, None).await?;
             match record {
                 Some(record) => {
                     let current = crate::witness::current_weight(Some(&crate::witness::Standing {
@@ -1677,7 +1677,7 @@ impl Autobee {
 
         let standing = {
             let system = self.system.lock().await;
-            let record = system.get(&self.local_key, false).await?;
+            let record = system.get(&self.local_key, false, None).await?;
             record.map_or(0, |record| {
                 crate::witness::current_weight(Some(&crate::witness::Standing {
                     weight: record.weight as i64,
@@ -1712,7 +1712,7 @@ impl Autobee {
                 continue;
             }
             let system = self.system.lock().await;
-            let Some(target) = system.get(&key, false).await? else {
+            let Some(target) = system.get(&key, false, None).await? else {
                 continue;
             };
             if target.is_removed {
@@ -1935,7 +1935,7 @@ impl crate::witness::Reader for Refs<'_> {
             .system
             .lock()
             .await
-            .get(key, false)
+            .get(key, false, None)
             .await?
             .map(|writer| crate::witness::Standing {
                 weight: writer.weight as i64,
@@ -2379,7 +2379,7 @@ impl Autobee {
         {
             let system = self.system.lock().await;
             if system
-                .get(&key, true)
+                .get(&key, true, None)
                 .await?
                 .is_none_or(|info| info.length < length)
             {
