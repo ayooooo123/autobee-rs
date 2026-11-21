@@ -171,8 +171,16 @@ impl SystemBee {
                 self.flushes = self.bee.length() / 2;
                 self.promotions.reset(self.bee.clone(), Vec::new());
             }
-            Some(SystemInfoValue::V3(info)) => {
-                self.version = 3;
+            Some(value @ (SystemInfoValue::V3(_) | SystemInfoValue::V4(_))) => {
+                self.version = if matches!(value, SystemInfoValue::V4(_)) {
+                    4
+                } else {
+                    3
+                };
+                let info = match value {
+                    SystemInfoValue::V3(info) | SystemInfoValue::V4(info) => info,
+                    _ => unreachable!(),
+                };
                 self.view = Some(Head {
                     key: info.view.key,
                     length: info.view.length,
@@ -502,7 +510,7 @@ impl SystemBee {
         let pending = self.promotions.flush_pending(&self.updates).await?;
         ops.extend(grants);
         ops.extend(pending);
-        let flushes = self.flushes + 1;
+        let flushes = self.flushes.saturating_add(1);
         let info = SystemInfoV3 {
             timestamp: self.timestamp,
             flushes,
@@ -515,6 +523,7 @@ impl SystemBee {
             pending: Some(self.promotions.digest.clone()),
             hash: self.hash,
         };
+        // PearTube's JS peer is pinned to autobee 2.12.1, which cannot read v4.
         ops.push(Operation {
             key: Bytes::from_static(INFO_KEY),
             value: Some(encoding::encode_system_info(&SystemInfo::V3(info))),

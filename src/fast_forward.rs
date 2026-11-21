@@ -10,10 +10,8 @@
 //! * oplog reads and core sessions (`openCore`, `readOplog`)
 //! * view checkouts and their handler close (`openView`, `openViewAt`)
 //! * the trust cache (`isTrusted`, `mostRecentTrusted`)
-//! * the reindex probe and the two counters the landing rules compare
+//! * the reindex probe and the counter the landing rules compare
 //! * the scratch (`reboot` namespace) system bee
-//! * the warmup hook and the two `migrations.js` primitives used by the legacy
-//!   crawl, which `crate::migrations` does not expose yet
 //!
 //! Cancellation is one [`RequestBag`] shared by every read the fast-forward
 //! issues. The bag is handed to the warmup hook as well: hyperbee-rs takes read
@@ -22,7 +20,6 @@
 //! writer-record reads of [`SystemBee::get`] take no options, so they are the
 //! one place the reference's `{ timeout, activeRequests }` cannot reach.
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -33,7 +30,7 @@ use hypercore::core::Session;
 use hypercore::{GetOptions, RequestBag};
 use tokio::task::JoinHandle;
 
-use crate::constants::{DEFAULT_OP_TIMEOUT, LEGACY_AUTOBASE_VERSION, LEGACY_OPLOG_VERSION};
+use crate::constants::{DEFAULT_OP_TIMEOUT, LEGACY_AUTOBASE_VERSION};
 use crate::system::SystemBee;
 use crate::types::{Head, Key, Node};
 
@@ -48,9 +45,6 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait Host: Send + Sync {
     /// `auto.openCore(key)` and `auto.store.get({ key, ... })`.
     fn open_core(&self, key: Key) -> BoxFuture<'_, Option<Arc<Session>>>;
-
-    /// `auto.store.get({ key, encryption: null })` after `setEncryption`.
-    fn open_legacy_core(&self, key: Key) -> BoxFuture<'_, Option<Arc<Session>>>;
 
     /// `auto.readOplog(core, length, { timeout })`, decoded.
     fn read_oplog(
@@ -100,14 +94,6 @@ pub trait Host: Send + Sync {
 
     /// `migrations.coreLength(core, timeout)`.
     fn core_length(&self, core: Arc<Session>, timeout: u64) -> BoxFuture<'_, u64>;
-
-    /// `migrations.readLegacySystemInfo(core, length, { timeout })`.
-    fn read_legacy_system_info(
-        &self,
-        core: Arc<Session>,
-        length: u64,
-        timeout: u64,
-    ) -> BoxFuture<'_, Option<crate::types::Info>>;
 }
 
 /// What `run()` hands back: the head the integrator may boot onto. The
@@ -464,7 +450,7 @@ impl FastForward {
         let timeout = Some(Duration::from_millis(self.timeout));
         self.system.boot(head, timeout).await.map_err(|_| ())?;
 
-        if self.system.version <= LEGACY_AUTOBASE_VERSION && !self.run_legacy(host).await {
+        if self.system.version <= LEGACY_AUTOBASE_VERSION {
             return Ok(None);
         }
 
@@ -570,149 +556,6 @@ impl FastForward {
         self.cores.push(core);
         length
     }
-
-    async fn run_legacy(&mut self, host: &dyn Host) -> bool {
-        let Some((head, autobee)) = self.resolve_legacy(host).await else {
-            return false;
-        };
-        let timeout = Some(Duration::from_millis(self.timeout));
-
-        if let Some(autobee) = autobee
-            && let Some(views) = autobee.views.as_ref()
-        {
-            self.head = batch_to_head(views.system.key, views.system.start, views.system.length);
-            if let Some(head) = bee_head(self.head)
-                && self.system.boot(head, timeout).await.is_ok()
-                && self.system.version > LEGACY_AUTOBASE_VERSION
-            {
-                return true;
-            }
-        }
-
-        self.head = head;
-        match bee_head(self.head) {
-            Some(head) => self.system.boot(head, timeout).await.is_ok(),
-            None => false,
-        }
-    }
-
-    /// The legacy crawl of `_resolveLegacy`: public because it is a self
-    /// contained phase the reference's `_run` calls, and the only place the
-    /// hop and cycle bounds live.
-    pub async fn resolve_legacy(&mut self, host: &dyn Host) -> Option<(Head, Option<Node>)> {
-        let mut head = self.head;
-        let mut seen = HashSet::new();
-
-        // bound at 5 hops for safety
-        let mut hops = 5i32;
-        loop {
-            seen.insert(head.key?);
-
-            let core = host.open_legacy_core(head.key?).await?;
-            self.cores.push(core.clone());
-
-            // successors are resolved by key only - wait for the replicated length
-            if head.length == 0 {
-                head.length = host.core_length(core.clone(), self.timeout).await;
-            }
-            if head.length == 0 || self.destroyed {
-                return None;
-            }
-
-            let info = host
-                .read_legacy_system_info(core, head.length, self.timeout)
-                .await?;
-            let (legacy, autobee) = self.find_newest_system(host, &info).await;
-            if self.destroyed {
-                return None;
-            }
-
-            // an autobee candidate ends the crawl: it may be behind, but once we
-            // are on autobee the ordinary fast-forward carries us to the newest
-            if autobee.is_some() {
-                return Some((head, autobee));
-            }
-
-            if hops > 0 {
-                hops -= 1;
-                if let Some(legacy) = legacy
-                    && !seen.contains(&legacy)
-                {
-                    head = Head {
-                        key: Some(legacy),
-                        length: 0,
-                    };
-                    continue;
-                }
-            }
-
-            return Some((head, None));
-        }
-    }
-
-    async fn find_newest_system(
-        &mut self,
-        host: &dyn Host,
-        info: &crate::types::Info,
-    ) -> (Option<Key>, Option<Node>) {
-        let mut autobee = None;
-        let mut legacy = None;
-        let mut flushes = -1i64;
-
-        for idx in info.indexers.iter().flatten() {
-            let Some(key) = idx.key else {
-                continue;
-            };
-            let Some(core) = host.open_core(key).await else {
-                continue;
-            };
-            self.cores.push(core.clone());
-
-            let length = host.core_length(core, self.timeout).await;
-            if length == 0 || length <= idx.length || self.destroyed {
-                continue;
-            }
-
-            let oplog = Self::flush_head(
-                host,
-                Head {
-                    key: Some(key),
-                    length,
-                },
-                self.timeout,
-            )
-            .await;
-            let Some(oplog) = oplog else {
-                continue;
-            };
-            let Some(views) = oplog.views.as_ref() else {
-                continue;
-            };
-
-            // this indexer has already moved to autobee: follow it rather than
-            // digging a legacy stamp out of its history
-            if oplog.version > LEGACY_OPLOG_VERSION {
-                if autobee
-                    .as_ref()
-                    .is_none_or(|current: &Node| views.flushes > flushes_of(current))
-                {
-                    autobee = Some(oplog);
-                }
-                continue;
-            }
-
-            let sys = &views.system;
-
-            // follow whichever indexer has checkpointed furthest
-            if views.flushes as i64 > flushes {
-                flushes = views.flushes as i64;
-                legacy = Some(sys.key);
-            }
-        }
-
-        (legacy, autobee)
-    }
-
     /// `clearRequests(err)`: fails every read in flight and any that come after.
     pub fn clear_requests(&self, reason: impl Into<String>) {
         self.active_requests.destroy(reason);
@@ -745,7 +588,7 @@ fn flushes_of(node: &Node) -> u64 {
 fn batch_to_head(key: Key, start: u64, length: u64) -> Head {
     Head {
         key: Some(key),
-        length: start + length,
+        length: start.saturating_add(length),
     }
 }
 
@@ -787,5 +630,15 @@ impl<'a> Oplogs<'a> {
         let mut ranked: Vec<&Node> = self.entries.iter().map(|(_, _, node)| *node).collect();
         ranked.sort_by_key(|node| std::cmp::Reverse(flushes_of(node)));
         ranked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::batch_to_head;
+
+    #[test]
+    fn batch_to_head_saturates_hostile_range() {
+        assert_eq!(batch_to_head([0; 32], u64::MAX, 2).length, u64::MAX);
     }
 }

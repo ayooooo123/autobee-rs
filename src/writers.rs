@@ -29,12 +29,6 @@ const BATCH_WRITER_SANITY: usize = 1024;
 const BATCH_OPTIMISTIC_SANITY: u64 = 32;
 const MAX_FORWARD_TIME_DRIFT: u64 = 2 * 3600 * 1000;
 
-/// An approval weight is a writer's standing, and promotions keeps one digest
-/// slot per weight unit. The protocol caps untrusted writers at
-/// [`DEFAULT_MAX_UNTRUSTED_WRITERS`], so no honest grant can approach this:
-/// freeze a block above it instead of allocating the digest (JS OOMs here).
-const MAX_APPROVAL_WEIGHT: u64 = 1 << 20;
-
 /// The core-coupler side of a writer: announces the core over peers that lack
 /// it (JS `writer.couple()` / `decouple()`).
 pub trait Coupler: Send + Sync {
@@ -89,6 +83,8 @@ pub struct ActiveWriters {
     buffered: HashMap<Key, Vec<Node>>,
     wake: Wake,
     coupler: Option<Arc<dyn Coupler>>,
+    /// The wakeup group remote writer cores join (`wakeupCapability.discoveryKey`).
+    pub group: Option<Key>,
 }
 
 impl ActiveWriters {
@@ -110,6 +106,7 @@ impl ActiveWriters {
             buffered: HashMap::new(),
             wake,
             coupler,
+            group: None,
         }
     }
 
@@ -273,26 +270,20 @@ impl ActiveWriters {
     ) -> corestore::Result<bool> {
         // a session that the store's gc collected must be reopened, or the
         // writer would wait on a dead core forever
-        if self
-            .writers
-            .get(&key)
-            .is_some_and(|writer| writer.core.is_closed())
+        if key != self.local
+            && self
+                .writers
+                .get(&key)
+                .is_some_and(|writer| writer.core.is_closed())
         {
             if let Some(writer) = self.writers.remove(&key) {
                 writer.core.close();
             }
             self.pending.remove(&key);
         }
+        // the local writer is always tracked: it is reattached, never doubled
         if let Some(writer) = self.writers.get_mut(&key) {
             if !writer.attached {
-                writer.attached = true;
-                self.pending.insert(key);
-            }
-            return Ok(true);
-        }
-        // the local writer is never tracked twice; reattach instead
-        if key == self.local {
-            if let Some(writer) = self.writers.get_mut(&key) {
                 writer.attached = true;
                 self.pending.insert(key);
             }
@@ -313,6 +304,7 @@ impl ActiveWriters {
             .get(corestore::GetOptions {
                 key: Some(key),
                 inactive: true,
+                group: self.group,
                 ..Default::default()
             })
             .await?;
@@ -434,6 +426,9 @@ impl ActiveWriters {
         }
         if let Some(writer) = self.detach(key) {
             writer.core.close();
+        } else if let Some(local) = self.writers.get_mut(key) {
+            // `w.decouple()` runs for the local writer too
+            local.decouple();
         }
         self.sync_writable();
         Ok(())
@@ -462,6 +457,9 @@ impl ActiveWriters {
                 continue;
             }
             writer.waiting = None;
+            // autobee 2.13 `reset()`: local nodes processed against a system
+            // a landing replaced are re-applied before they are flushed
+            writer.processed = 0;
             if !writer.attached {
                 // JS `Writer.reset` detaches and closes a caught-up non-head writer here. Doing
                 // that in Rust closed the only session this writer has: the peer's next block --
@@ -757,21 +755,13 @@ impl Writer {
             }
         };
         match oplog {
-            Ok(oplog) => {
-                // a weight above the bound is malformed: freezing skips the
-                // block without touching system bytes or the promotions digest
-                if approvals_over_bound(&oplog) {
-                    self.is_frozen = true;
-                    return None;
-                }
-                Some(Node::from_oplog(
-                    *self.core.key(),
-                    index + 1,
-                    weight,
-                    &oplog,
-                    Some(WriterRef(self.core.core().clone())),
-                ))
-            }
+            Ok(oplog) => Some(Node::from_oplog(
+                *self.core.key(),
+                index + 1,
+                weight,
+                &oplog,
+                Some(WriterRef(self.core.core().clone())),
+            )),
             Err(_) => {
                 self.is_frozen = true;
                 None
@@ -965,6 +955,19 @@ impl Writer {
             let Some(mut node) = self.read_node(length, -1) else {
                 return Ok(Next::Unavailable);
             };
+            // topo finds a batch from its head's coordinates, so the i-th
+            // block must say `start: i` and the ends count down to 0; a block
+            // that lies is malformed (the reference reads before the oplog
+            // start and hangs)
+            if node.version > crate::encoding::LEGACY_OPLOG_VERSION
+                && (node.batch.start != batch.len() as u64
+                    || batch.last().is_some_and(|previous: &Node| {
+                        node.batch.end.checked_add(1) != Some(previous.batch.end)
+                    }))
+            {
+                self.is_frozen = true;
+                return Ok(Next::Unavailable);
+            }
             length += 1;
             if writable_local {
                 node.optimistic = false;
@@ -1093,18 +1096,6 @@ impl Drop for Writer {
             download.abort();
         }
     }
-}
-
-fn approvals_over_bound(oplog: &crate::encoding::DecodedOplog) -> bool {
-    let approvals = match oplog {
-        crate::encoding::DecodedOplog::Mapped(m) => m.approvals.as_ref(),
-        crate::encoding::DecodedOplog::V4(m) => m.approvals.as_ref(),
-    };
-    approvals.is_some_and(|approvals| {
-        approvals
-            .iter()
-            .any(|approval| approval.weight > MAX_APPROVAL_WEIGHT)
-    })
 }
 
 /// Normalize legacy batch coordinates while preserving unavailable blocks.
@@ -1554,38 +1545,6 @@ mod tests {
             weight_hint: None,
             drift: None,
         }
-    }
-
-    #[tokio::test]
-    async fn oversized_approval_weight_freezes_the_writer() {
-        let (_dir, _store, core) = test_core(12, "remote").await;
-        let mut encoded =
-            crate::encoding::Oplog::V4(oplog(Some(vec![crate::encoding::Approval {
-                key: [1; 32],
-                // one byte over the bound: the promotions digest would resize by
-                // this many slots before any honest grant could reach it
-                weight: (1 << 20) + 1,
-            }])));
-        core.append(&[crate::encoding::encode_oplog(&mut encoded)])
-            .await
-            .unwrap();
-        let mut writer = Writer::new(core, false, Arc::new(|| {}), None);
-        assert!(writer.read_node(0, 0).is_none());
-        assert!(writer.is_frozen, "the malformed block freezes the writer");
-
-        // the same block within the bound still reads
-        let (_dir, _store, core) = test_core(13, "remote").await;
-        let mut encoded =
-            crate::encoding::Oplog::V4(oplog(Some(vec![crate::encoding::Approval {
-                key: [1; 32],
-                weight: 1 << 20,
-            }])));
-        core.append(&[crate::encoding::encode_oplog(&mut encoded)])
-            .await
-            .unwrap();
-        let mut writer = Writer::new(core, false, Arc::new(|| {}), None);
-        assert!(writer.read_node(0, 0).is_some());
-        assert!(!writer.is_frozen);
     }
 
     #[tokio::test]

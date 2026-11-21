@@ -1,7 +1,9 @@
-use autobee::encoding::{Batch, GrantHint, Link, SystemInfoValue};
+use autobee::encoding::{self, Batch, GrantHint, Link, SystemInfo, SystemInfoV3, SystemInfoValue};
 use autobee::order_hash::advance_hash;
+use autobee::promotions::MAX_PENDING_UNITS;
 use autobee::system::{AddWriterOptions, SystemBee, WriterUpdate};
 use autobee::types::Node;
+use bytes::Bytes;
 use corestore::{Corestore, GetOptions};
 use hyperbee::{Bee, Head};
 use serde_json::Value;
@@ -497,4 +499,120 @@ async fn promotion_partial_then_satisfied() {
     system.add_node(&n).unwrap();
     system.flush(std::slice::from_ref(&n), view).await.unwrap();
     assert_eq!(system.promotions.anchored(&writer).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn promotion_digest_matches_npm_for_descending_pending_weights() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Corestore::open_with_primary_key(dir.path(), [43; 32]).unwrap();
+    let bee = Bee::open(&store, None).await.unwrap();
+    let mut system = SystemBee::new(bee);
+    let update = |key, pending| {
+        let mut update = WriterUpdate::new(key);
+        update.pending = Some(pending);
+        update
+    };
+
+    system
+        .promotions
+        .flush_pending(&[update([0xa1; 32], 5), update([0xb2; 32], 2)])
+        .await
+        .unwrap();
+    // `lib/promotions.js` returns this for the same two updates.
+    assert_eq!(system.promotions.digest, [true, true, true, true, true]);
+}
+
+#[tokio::test]
+async fn promotion_digest_rejects_v8_set_and_array_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Corestore::open_with_primary_key(dir.path(), [46; 32]).unwrap();
+    let bee = Bee::open(&store, None).await.unwrap();
+    let mut system = SystemBee::new(bee);
+    let update = |key, pending, grant| {
+        let mut update = WriterUpdate::new(key);
+        update.pending = Some(pending);
+        update.grant = grant;
+        update
+    };
+    assert!(
+        system
+            .promotions
+            .flush_pending(&[update([0xd4; 32], 1 << 21, None)])
+            .await
+            .is_ok()
+    );
+
+    let mut system = SystemBee::new(Bee::open(&store, None).await.unwrap());
+    let half = (MAX_PENDING_UNITS / 2 + 1) as u64;
+    assert!(
+        system
+            .promotions
+            .flush_pending(&[
+                update([0xa1; 32], half, None),
+                update(
+                    [0xb2; 32],
+                    half * 2,
+                    Some(GrantHint {
+                        key: [0; 32],
+                        length: 0,
+                        weight: half,
+                    }),
+                ),
+            ])
+            .await
+            .is_err()
+    );
+
+    let mut system = SystemBee::new(Bee::open(&store, None).await.unwrap());
+    assert!(
+        system
+            .promotions
+            .flush_pending(&[update(
+                [0xc3; 32],
+                (1 << 40) + 1,
+                Some(GrantHint {
+                    key: [0; 32],
+                    length: 0,
+                    weight: 1 << 40,
+                }),
+            )])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn version_four_system_info_boots_with_v3_shape() {
+    let info = SystemInfoV3 {
+        timestamp: 7,
+        flushes: 3,
+        view: Link {
+            key: [1; 32],
+            length: 2,
+        },
+        heads: vec![Link {
+            key: [2; 32],
+            length: 4,
+        }],
+        indexers: None,
+        pending: Some(vec![]),
+        hash: Some([3; 8]),
+    };
+    let v3 = encoding::encode_system_info(&SystemInfo::V3(info.clone()));
+    let v4 = encoding::encode_system_info(&SystemInfo::V4(info.clone()));
+    assert_eq!(&v3[1..], &v4[1..]);
+    assert_eq!(
+        encoding::decode_system_info(v4.clone()).unwrap(),
+        SystemInfoValue::V4(info)
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Corestore::open_with_primary_key(dir.path(), [44; 32]).unwrap();
+    let bee = Bee::open(&store, None).await.unwrap();
+    let mut write = bee.batch();
+    write.put(Bytes::from_static(&[0]), v4);
+    write.flush().await.unwrap();
+    let mut system = SystemBee::new(bee.clone());
+    system.boot(bee.head().unwrap(), None).await.unwrap();
+    assert_eq!(system.version, 4);
 }

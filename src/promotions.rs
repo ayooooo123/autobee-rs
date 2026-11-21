@@ -17,6 +17,10 @@ pub struct Promotions {
     pending: Option<Vec<([u8; 32], u64)>>,
 }
 
+/// V8 rejects a `Set` larger than this many entries. `pending` is bit-packed
+/// on disk, but npm decodes it into an Array, whose maximum length is u32::MAX.
+pub const MAX_PENDING_UNITS: usize = 1 << 24;
+
 impl Promotions {
     pub fn new(bee: Bee) -> Self {
         Self {
@@ -170,15 +174,29 @@ impl Promotions {
             }
         }
         let mut digest = Vec::new();
+        let mut open = 0usize;
         for (key, weight) in self.pending.as_ref().unwrap() {
             let anchored = match anchored_by.iter().find(|(k, _)| k == key) {
                 Some((_, weight)) => *weight,
                 None => self.anchored(key).await?,
             };
             if anchored < *weight {
+                // one key's range is that many distinct units on its own: fail before allocating
+                if *weight > u32::MAX as u64 || *weight - anchored > MAX_PENDING_UNITS as u64 {
+                    return Err(hyperbee::Error::Message("too many pending promotion units"));
+                }
                 digest.resize(digest.len().max(*weight as usize), false);
                 for w in anchored + 1..=*weight {
-                    digest[(w - 1) as usize] = true;
+                    let pending = &mut digest[(w - 1) as usize];
+                    if !*pending {
+                        open += 1;
+                        if open > MAX_PENDING_UNITS {
+                            return Err(hyperbee::Error::Message(
+                                "too many pending promotion units",
+                            ));
+                        }
+                        *pending = true;
+                    }
                 }
             }
         }

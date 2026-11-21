@@ -10,9 +10,9 @@ use autobee::apply_calls::{
     AddWriterOptions, ApplyCalls, Auto, BoxFuture, Result as HandlerResult, SystemAddWriter,
 };
 use autobee::apply_view::Handlers;
-use autobee::triggers::Writer as _;
 use autobee::types::{Head, Key, Link, Node};
-use autobee::{boot, encoding, migrations, triggers, trusted, updates};
+use autobee::writers::ActiveWriters;
+use autobee::{boot, encoding, migrations, trusted, updates};
 use corestore::{Corestore, GetOptions};
 use hyperbee::Bee;
 use serde_json::Value;
@@ -244,108 +244,99 @@ async fn boot_fixtures() {
 
 // --- triggers ------------------------------------------------------------
 
-struct TestWriter {
-    name: String,
-    waiting: Mutex<Option<triggers::Entry>>,
-    bumps: Arc<Mutex<Vec<String>>>,
-}
-
-impl TestWriter {
-    fn new(name: &str, bumps: Arc<Mutex<Vec<String>>>) -> Self {
-        Self {
-            name: name.to_string(),
-            waiting: Mutex::new(None),
-            bumps,
-        }
-    }
-}
-
-impl triggers::Writer for TestWriter {
-    fn waiting(&self) -> Option<triggers::Entry> {
-        self.waiting.lock().unwrap().clone()
-    }
-
-    fn bump(&self) {
-        self.bumps.lock().unwrap().push(self.name.clone());
-    }
-}
-
-#[test]
-fn triggers_fixtures() {
+/// `lib/triggers.js` is folded into `Writer::waiting` and
+/// `ActiveWriters::notify_batch`; the recorded steps drive that code. The JS
+/// stub writer never clears its own `waiting`, while a real writer's `bump()`
+/// does (`Writer.bump` in `writers.js`), so a writer bumped or removed since
+/// its last add waits on nothing here. Bucket indexes have no counterpart: a
+/// writer waits on one link and nothing else.
+#[tokio::test]
+async fn triggers_fixtures() {
     let fixtures = fixture(UNITS);
     let steps = fixtures["triggers"]["steps"].as_array().unwrap();
 
-    let mut triggers = triggers::Triggers::new();
-    let bumps = Arc::new(Mutex::new(Vec::new()));
-    let mut writers: std::collections::HashMap<String, Arc<TestWriter>> =
-        std::collections::HashMap::new();
-    let mut entry: Option<triggers::Entry> = None;
-
-    let writer = |writers: &mut std::collections::HashMap<String, Arc<TestWriter>>, name: &str| {
-        writers
-            .entry(name.to_string())
-            .or_insert_with(|| Arc::new(TestWriter::new(name, bumps.clone())))
-            .clone()
-    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Corestore::open_with_primary_key(dir.path(), [21; 32]).unwrap();
+    let local = store.get(GetOptions::name("local")).await.unwrap();
+    let bootstrap = [21; 32];
+    let mut writers = ActiveWriters::new(local, Arc::new(|| {}), None);
+    let mut names: Vec<(String, Key)> = Vec::new();
+    let mut cleared = std::collections::HashSet::new();
 
     for step in steps {
+        for key in writers.pending.as_slice().to_vec() {
+            writers.pending.remove(&key);
+        }
         let op = &step["op"];
+        let name = op
+            .get("add")
+            .or_else(|| op.get("remove"))
+            .map(|op| op["writer"].as_str().unwrap().to_string());
+        if let Some(name) = &name
+            && !names.iter().any(|(known, _)| known == name)
+        {
+            let core = store.get(GetOptions::name(name.as_str())).await.unwrap();
+            let key = *core.key();
+            core.close();
+            assert!(writers.add(&store, &bootstrap, key, true, 0).await.unwrap());
+            writers.pending.remove(&key);
+            names.push((name.clone(), key));
+        }
+        let key_of_name = |name: &str| {
+            names
+                .iter()
+                .find(|(known, _)| known == name)
+                .map(|(_, key)| *key)
+                .unwrap()
+        };
+
         if let Some(add) = op.get("add") {
-            let name = add["writer"].as_str().unwrap();
-            let w = writer(&mut writers, name);
-            let writer_ref: Arc<dyn triggers::Writer> = w.clone();
-            let added = triggers.add(
-                key_of(&add["id"]),
-                add["length"].as_u64().unwrap(),
-                &writer_ref,
-            );
-            *w.waiting.lock().unwrap() = Some(added.clone());
-            entry = Some(added);
-        } else if let Some(remove) = op.get("remove") {
-            let w = writer(&mut writers, remove["writer"].as_str().unwrap());
-            if let Some(waiting) = w.waiting() {
-                triggers.remove(&waiting);
-            }
+            let name = name.clone().unwrap();
+            writers.get_mut(&key_of_name(&name)).unwrap().waiting = Some(Link {
+                key: key_of(&add["id"]),
+                length: add["length"].as_u64().unwrap(),
+            });
+            cleared.remove(&name);
+        } else if op.get("remove").is_some() {
+            let name = name.clone().unwrap();
+            writers.get_mut(&key_of_name(&name)).unwrap().waiting = None;
+            cleared.insert(name);
         } else if let Some(trigger) = op.get("trigger") {
-            triggers.trigger(&key_of(&trigger["id"]), trigger["length"].as_u64().unwrap());
+            writers.notify_batch(&key_of(&trigger["id"]), trigger["length"].as_u64().unwrap());
         } else {
             panic!("unknown trigger op {op}");
         }
 
-        let expected_entry = &step["entry"];
-        match (&entry, expected_entry.as_object()) {
-            (None, None) => {}
-            (Some(entry), Some(expected)) => {
-                assert_eq!(hex(&entry.id()), expected["id"].as_str().unwrap());
-                assert_eq!(entry.index(), expected["index"].as_u64().unwrap() as usize);
-                assert_eq!(entry.length(), expected["length"].as_u64().unwrap());
-            }
-            other => panic!("entry mismatch {other:?}"),
-        }
-
-        let bumped: Vec<String> = bumps.lock().unwrap().drain(..).collect();
-        let expected_bumps: Vec<String> = step["bumps"]
+        let mut bumped: Vec<String> = names
+            .iter()
+            .filter(|(_, key)| writers.pending.contains(key))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut expected_bumps: Vec<String> = step["bumps"]
             .as_array()
             .unwrap()
             .iter()
             .map(|value| value.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(bumped, expected_bumps);
+        bumped.sort();
+        expected_bumps.sort();
+        assert_eq!(bumped, expected_bumps, "bumps after {op}");
+        cleared.extend(bumped);
 
         let waiting = step["waiting"].as_object().unwrap();
-        assert_eq!(
-            waiting.len(),
-            writers
-                .values()
-                .filter(|writer| writer.waiting().is_some())
-                .count(),
-            "waiting writer count"
-        );
-        for (name, expected) in waiting {
-            let entry = writers[name].waiting().expect("waiting entry");
-            assert_eq!(hex(&entry.id()), expected["id"].as_str().unwrap());
-            assert_eq!(entry.index(), expected["index"].as_u64().unwrap() as usize);
-            assert_eq!(entry.length(), expected["length"].as_u64().unwrap());
+        for (name, key) in &names {
+            let expected = waiting
+                .get(name)
+                .filter(|_| !cleared.contains(name))
+                .map(|expected| Link {
+                    key: key_of(&expected["id"]),
+                    length: expected["length"].as_u64().unwrap(),
+                });
+            assert_eq!(
+                writers.get(key).unwrap().waiting,
+                expected,
+                "{name} waits after {op}"
+            );
         }
     }
 }

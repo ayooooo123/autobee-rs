@@ -16,7 +16,6 @@ pub mod order_hash;
 pub mod promotions;
 pub mod system;
 pub mod topo;
-pub mod triggers;
 pub mod trusted;
 pub mod types;
 pub mod updates;

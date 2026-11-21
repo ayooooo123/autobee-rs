@@ -3,9 +3,10 @@
 //!
 //! One `Autobee` is one writer's materialised state: its own `system` and
 //! `view` cores under `autobee/<local>/view/...`, its local oplog, and the
-//! remote writers it follows. Every public mutation (`append`, `wakeup`,
-//! `update`) bumps a single counter and waits for the drain that consumes it;
-//! a background driver runs the same drain for hints that arrive on their own.
+//! remote writers it follows. Only the driver task drains, as the reference's
+//! detached `_draining` promise does. Every public mutation (`append`,
+//! `wakeup`, `update`) bumps a single counter and awaits the drain that
+//! consumes it, so dropping a caller's future never aborts a drain halfway.
 //!
 //! Cuts, all unreachable for PearTube and refused rather than half-ported:
 //! legacy autobase migration (`SystemBee::reset` fails on old storage), the
@@ -13,6 +14,7 @@
 //! opens uses manifest version 3), and `setLocal` rotation. `moveTo`/`replay`
 //! are not part of the writable path.
 
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -21,7 +23,7 @@ use std::sync::{
 use corestore::{Corestore, GetOptions, GroupNotify};
 use hyperbee::{Bee, Head as BeeHead};
 use hypercore::core::{Core, Session};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::task::JoinHandle;
 
 use crate::apply_calls::{AddWriterOptions, ApplyCalls};
@@ -39,6 +41,11 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// `DEFAULT_ACK_THRESHOLD`.
 const DEFAULT_ACK_THRESHOLD: u64 = 32;
+
+/// Fast-forward candidates resolved per search round. The reference resolves
+/// all of them at once; announced keys are free to forge, so the rest wait
+/// for the next round.
+const MAX_FF_CANDIDATES: usize = 64;
 
 /// `stats`: the counters the reference exposes for tests and logs.
 #[derive(Debug, Default)]
@@ -66,22 +73,54 @@ pub trait FlushObserver: Send + Sync {
     );
 }
 
-/// The drain's request counter plus the wake the driver waits on
-/// (`_bumpSignal` and `bumping`).
-#[derive(Default)]
+/// The drain's request counter, the wake the driver waits on (`_bumpSignal`
+/// and `bumping`) and the drain progress callers await (`_draining`).
 struct Bump {
     pending: AtomicU64,
+    /// Every bump ever made; a bump's number is its ticket.
+    requested: AtomicU64,
     wake: Notify,
+    drained: watch::Sender<Drained>,
+}
+
+/// What the driver has drained so far.
+#[derive(Default)]
+struct Drained {
+    /// Every ticket up to here is drained.
+    done: u64,
+    /// The drain that failed, as its first and last ticket and the error. A
+    /// drain error closes the session and an interrupt stops every later
+    /// drain, so there is at most one.
+    failed: Option<(u64, u64, Arc<str>)>,
+    closed: bool,
+}
+
+impl Default for Bump {
+    fn default() -> Self {
+        Self {
+            pending: AtomicU64::new(0),
+            requested: AtomicU64::new(0),
+            wake: Notify::new(),
+            drained: watch::channel(Drained::default()).0,
+        }
+    }
 }
 
 impl Bump {
-    fn bump(&self) {
-        self.pending.fetch_add(1, Ordering::AcqRel);
+    /// Marks work for the driver and returns the ticket a caller can await.
+    fn bump(&self) -> u64 {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        let ticket = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
         self.wake.notify_one();
+        ticket
+    }
+
+    fn requested(&self) -> u64 {
+        self.requested.load(Ordering::SeqCst)
     }
 
     fn take(&self) -> u64 {
-        self.pending.load(Ordering::Acquire)
+        self.pending.load(Ordering::SeqCst)
     }
 
     /// Collapse the counter to "one more pass" without losing a bump that
@@ -89,9 +128,47 @@ impl Bump {
     fn keep_one(&self) {
         let _ = self
             .pending
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |pending| {
                 Some(if pending <= 1 { 0 } else { 1 })
             });
+    }
+
+    /// Every ticket up to `upto` is drained; `error` fails the tickets this
+    /// drain took.
+    fn finish(&self, upto: u64, error: Option<&Error>) {
+        self.drained.send_modify(|state| {
+            if let Some(error) = error
+                && state.failed.is_none()
+            {
+                state.failed = Some((state.done + 1, upto, Arc::from(error.to_string())));
+            }
+            state.done = state.done.max(upto);
+        });
+    }
+
+    fn close(&self) {
+        self.drained.send_modify(|state| state.closed = true);
+    }
+
+    /// Waits until the driver drained `ticket` or the session closed.
+    async fn wait(&self, ticket: u64) -> Result<()> {
+        let mut drained = self.drained.subscribe();
+        loop {
+            {
+                let state = drained.borrow_and_update();
+                if state.done >= ticket || state.closed {
+                    return match &state.failed {
+                        Some((first, last, error)) if (*first..=*last).contains(&ticket) => {
+                            Err(std::io::Error::other(error.to_string()).into())
+                        }
+                        _ => Ok(()),
+                    };
+                }
+            }
+            if drained.changed().await.is_err() {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -106,6 +183,8 @@ struct Seeds {
     ff_searching: bool,
     /// `_ffCandidates`, in first-seen order, longest length per key.
     candidates: Vec<(Key, u64)>,
+    /// Where each key sits in `candidates`.
+    candidate_index: HashMap<Key, usize>,
     local_system_start: u64,
     local_system_length: u64,
     local_view_start: u64,
@@ -183,6 +262,9 @@ pub struct Autobee {
     handlers: Arc<dyn Handlers>,
     system_store: Corestore,
     view_store: Corestore,
+    /// The scope every oplog read opens its sessions in, so `close` can end a
+    /// read parked on a block no peer serves.
+    reads: Corestore,
     /// The local root cores of the system and view trees. `Bee::key()` and
     /// `Bee::length()` follow the moved-to root, so the local ones are kept.
     system_core: Core,
@@ -191,6 +273,8 @@ pub struct Autobee {
     history: Mutex<Option<hyperbee::ChangesStream>>,
     applying: StdMutex<Option<Vec<Node>>>,
     interrupted: StdMutex<Option<String>>,
+    /// `_approvedPending`: the weight this writer already approved per key.
+    approved_pending: StdMutex<HashMap<Key, u64>>,
     interrupting: AtomicBool,
     closed: AtomicBool,
     flushes: AtomicU64,
@@ -204,7 +288,6 @@ pub struct Autobee {
     conservative: bool,
     has_update: bool,
     wake_host: Arc<WakeupHost>,
-    drain_lock: Mutex<()>,
     driver: StdMutex<Option<JoinHandle<()>>>,
     /// The spawned group-log reader (JS `_notifyHandler`), aborted with the session.
     group_updates: StdMutex<Option<JoinHandle<()>>>,
@@ -325,7 +408,9 @@ impl Autobee {
         };
         let wake: crate::writers::Wake = {
             let bump = Arc::clone(&bump);
-            Arc::new(move || bump.bump())
+            Arc::new(move || {
+                bump.bump();
+            })
         };
         let mut writers =
             ActiveWriters::new(boot.local, wake, Some(host.clone() as Arc<dyn Coupler>));
@@ -372,6 +457,7 @@ impl Autobee {
                 .as_ref()
                 .is_some_and(|options| options.conservative),
             handlers,
+            reads: store.session(),
             system_store,
             view_store,
             system_core: system_local.clone(),
@@ -380,6 +466,7 @@ impl Autobee {
             history: Mutex::new(None),
             applying: StdMutex::new(None),
             interrupted: StdMutex::new(None),
+            approved_pending: StdMutex::new(HashMap::new()),
             interrupting: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             flushes: AtomicU64::new(flushes),
@@ -389,7 +476,6 @@ impl Autobee {
             reindexed: AtomicBool::new(false),
             pre_applied: AtomicBool::new(false),
             wake_host: host,
-            drain_lock: Mutex::new(()),
             driver: StdMutex::new(None),
             group_updates: StdMutex::new(None),
             ff_search: StdMutex::new(None),
@@ -411,6 +497,10 @@ impl Autobee {
             discovery_key,
         });
         auto.wakeup.recouple();
+        // `writers.js` opens every remote writer core in the wakeup group, so
+        // its head moving is a group update like the bootstrap's
+        auto.writers.lock().await.group =
+            (!auto.store.read_only()).then_some(capability.discovery_key);
         auto.wakeup
             .set_capability(capability.key, Some(capability.discovery_key));
         auto.refresh_wakeup_writers().await;
@@ -423,6 +513,34 @@ impl Autobee {
         let notify = auto.store.notify_group(capability.discovery_key)?;
         auto.drain_boot_hints(&notify).await?;
         auto.watch_group(notify);
+
+        // `_bootOnline`: follow the system heads, or the bootstrap writer
+        // before there are any, so a peer that never sends a wakeup still
+        // has its blocks downloaded and applied
+        let heads: Vec<Key> = {
+            let system = auto.system.lock().await;
+            if system.heads.is_empty() {
+                vec![auto.key]
+            } else {
+                system.heads.iter().map(|head| head.key).collect()
+            }
+        };
+        let trusted = auto.is_local_trusted().await;
+        {
+            let mut writers = auto.writers.lock().await;
+            for key in heads {
+                writers
+                    .add(
+                        &auto.store,
+                        &auto.key,
+                        key,
+                        trusted,
+                        DEFAULT_MAX_UNTRUSTED_WRITERS,
+                    )
+                    .await?;
+            }
+        }
+        auto.refresh_wakeup_writers().await;
 
         spawn_driver(&auto);
         auto.update_acking().await;
@@ -462,6 +580,14 @@ impl Autobee {
 
     pub fn is_interrupting(&self) -> bool {
         self.interrupting.load(Ordering::Acquire)
+    }
+
+    /// `base.interrupted`: the reason an apply handler gave `interrupt()`.
+    pub fn interrupted(&self) -> Option<String> {
+        self.interrupted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -529,44 +655,18 @@ impl Autobee {
 
     /// `update()`: bump and wait for the drain that consumes it.
     pub async fn update(&self) -> Result<()> {
-        self.bump.bump();
-        self.run_drain().await
+        let ticket = self.bump.bump();
+        self.bump.wait(ticket).await
     }
 
-    /// `updated()`: wait for any drain already running.
+    /// `updated()`: wait for the drains every bump so far asked for.
     pub async fn updated(&self) -> Result<()> {
-        self.run_drain().await
+        self.bump.wait(self.bump.requested()).await
     }
 
     /// `flush()`: the reference waits for boot here; boot is part of `open`.
     pub async fn flush(&self) -> Result<()> {
-        self.run_drain().await
-    }
-
-    /// Serialises drains: callers and the driver share one drain at a time and
-    /// a caller that finds its bump already consumed returns immediately.
-    async fn run_drain(&self) -> Result<()> {
-        match self.drain_loop().await {
-            Ok(()) => Ok(()),
-            // the reference closes on any error but INTERRUPT, which leaves
-            // `_interrupting` set and resumes on the dirty in-memory state
-            Err(err) if self.is_interrupting() => Err(err),
-            Err(err) => {
-                self.on_error(&err);
-                self.close().await?;
-                Err(err)
-            }
-        }
-    }
-
-    async fn drain_loop(&self) -> Result<()> {
-        loop {
-            let _guard = self.drain_lock.lock().await;
-            if self.bump.take() == 0 || self.closed.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            self.drain_inner().await?;
-        }
+        self.updated().await
     }
 
     /// `_drain()`.
@@ -589,7 +689,7 @@ impl Autobee {
         }
 
         while !self.is_interrupting() && self.bump.take() > 0 {
-            let result = self.drain_pass().await;
+            let result = self.drain_pass(changes.as_mut()).await;
             // the reference's `finally`: one bump survives so an append that
             // landed mid-pass gets its own pass
             self.bump.keep_one();
@@ -607,7 +707,7 @@ impl Autobee {
     }
 
     /// One pass of the inner drain loop.
-    async fn drain_pass(&self) -> Result<()> {
+    async fn drain_pass(&self, changes: Option<&mut UpdateChanges>) -> Result<()> {
         loop {
             if self.is_interrupting() {
                 break;
@@ -619,6 +719,13 @@ impl Autobee {
 
             if self.lock_seeds().fast_forward_to.is_some() {
                 self.apply_fast_forward().await?;
+                // the landing moved both heads: report from here, not across the jump
+                if let Some(changes) = changes {
+                    changes.track(
+                        head_of(self.working_view.bee().head()),
+                        head_of(self.system.lock().await.bee.head()),
+                    );
+                }
                 self.needs_update.store(false, Ordering::Release);
                 break;
             }
@@ -662,7 +769,7 @@ impl Autobee {
         if hints.is_empty() {
             return Ok(Vec::new());
         }
-        self.lock_seeds().previous_drain = self.handlers.now();
+        self.lock_seeds().previous_drain = wall_clock();
 
         let mut results = Vec::new();
         for link in hints {
@@ -679,18 +786,18 @@ impl Autobee {
             {
                 continue;
             }
-            results.push(Link {
-                key: link.key,
-                length: if link.length == UNKNOWN_LENGTH {
-                    0
-                } else {
-                    link.length
-                },
-            });
+            results.push(link);
         }
 
         for link in &results {
             let trusted = self.is_local_trusted().await;
+            // an unknown length (JS `-1`) hints nothing to the writer but
+            // still makes its head a fast-forward candidate
+            let length = if link.length == UNKNOWN_LENGTH {
+                0
+            } else {
+                link.length
+            };
             self.writers
                 .lock()
                 .await
@@ -698,7 +805,7 @@ impl Autobee {
                     &self.store,
                     &self.key,
                     link.key,
-                    link.length,
+                    length,
                     trusted,
                     DEFAULT_MAX_UNTRUSTED_WRITERS,
                 )
@@ -728,13 +835,21 @@ impl Autobee {
                 if link.length == 0 {
                     continue;
                 }
-                match seeds
-                    .candidates
-                    .iter_mut()
-                    .find(|(key, _)| *key == link.key)
-                {
-                    Some((_, length)) => *length = (*length).max(link.length),
-                    None => seeds.candidates.push((link.key, link.length)),
+                // JS `previous < length` with `-1` as the smallest length
+                match seeds.candidate_index.get(&link.key).copied() {
+                    Some(index) => {
+                        let previous = &mut seeds.candidates[index].1;
+                        if *previous == UNKNOWN_LENGTH
+                            || (link.length != UNKNOWN_LENGTH && *previous < link.length)
+                        {
+                            *previous = link.length;
+                        }
+                    }
+                    None => {
+                        let index = seeds.candidates.len();
+                        seeds.candidate_index.insert(link.key, index);
+                        seeds.candidates.push((link.key, link.length));
+                    }
                 }
             }
             if seeds.candidates.is_empty() || seeds.ff_searching {
@@ -762,8 +877,10 @@ impl Autobee {
             return;
         };
         let handle = tokio::spawn(async move {
+            // `.finally(() => { this._ffSearching = null })`: a panic or an
+            // abort must not leave the session unable to search again
+            let _searching = SearchingGuard(Arc::clone(&auto));
             auto.search_fast_forward().await;
-            auto.lock_seeds().ff_searching = false;
         });
         *self.ff_search.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
@@ -782,7 +899,16 @@ impl Autobee {
                 {
                     return;
                 }
-                std::mem::take(&mut seeds.candidates)
+                let count = seeds.candidates.len().min(MAX_FF_CANDIDATES);
+                let hints: Vec<_> = seeds.candidates.drain(..count).collect();
+                let rest = seeds
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (key, _))| (*key, index))
+                    .collect();
+                seeds.candidate_index = rest;
+                hints
             };
             let heads: Vec<Link> = hints
                 .into_iter()
@@ -815,27 +941,52 @@ impl Autobee {
         }
     }
 
-    /// `_readCandidateHeads`: resolve each announced head to a readable oplog.
+    /// `_readCandidateHeads`: resolve each announced head to a readable oplog,
+    /// all at once as the reference's `Promise.all` does, in hint order.
     async fn read_candidate_heads(&self, hints: &[Link]) -> Vec<crate::types::Head> {
-        let mut heads = Vec::new();
-        for hint in hints {
+        let Some(auto) = self
+            .weak_self
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .upgrade()
+        else {
+            return Vec::new();
+        };
+        let mut reads = tokio::task::JoinSet::new();
+        for (index, hint) in hints.iter().enumerate() {
             if hint.length == 0 {
                 continue;
             }
-            if let Some(node) = self.resolve_oplog_hint(hint.clone()).await {
-                heads.push(crate::types::Head {
-                    key: Some(node.key),
-                    length: node.length,
-                });
+            let auto = Arc::clone(&auto);
+            let hint = hint.clone();
+            reads.spawn(async move { (index, auto.resolve_oplog_hint(hint).await) });
+        }
+        let mut heads = Vec::new();
+        while let Some(read) = reads.join_next().await {
+            if let Ok((index, Some(node))) = read {
+                heads.push((
+                    index,
+                    crate::types::Head {
+                        key: Some(node.key),
+                        length: node.length,
+                    },
+                ));
             }
         }
-        heads
+        heads.sort_by_key(|(index, _)| *index);
+        heads.into_iter().map(|(_, head)| head).collect()
     }
 
     /// `_resolveOplogHint`.
     async fn resolve_oplog_hint(&self, hint: Link) -> Option<Node> {
         let core = self.open_core(hint.key).await?;
-        let max = hint.length.max(core.length());
+        // `Math.max(-1, core.length)`: an unknown length reads the core's head
+        let length = if hint.length == UNKNOWN_LENGTH {
+            0
+        } else {
+            hint.length
+        };
+        let max = length.max(core.length());
         let block =
             Host::read_oplog(self, Arc::clone(&core), max, FastForward::DEFAULT_TIMEOUT).await;
         let result = match block {
@@ -1003,13 +1154,7 @@ impl Autobee {
             let mut writers = self.writers.lock().await;
             let mut reader = Refs(self);
             writers
-                .next_pending(
-                    &system,
-                    &mut reader,
-                    writable,
-                    local_only,
-                    self.handlers.now(),
-                )
+                .next_pending(&system, &mut reader, writable, local_only, wall_clock())
                 .await
                 .map_err(|err| match err {
                     crate::writers::SelectionError::System(err) => Error::from(err),
@@ -1113,12 +1258,10 @@ impl Autobee {
             let mut reader = Refs(self);
             crate::topo::sort(&mut reader, batch.into_iter().map(Some).collect()).await?
         };
+        // an empty tip would re-read the same batch forever; the reference
+        // hangs here too (`core.get` before the oplog start)
         let Some(mut sort) = sort else {
-            return Ok(crate::types::SortResult {
-                undo: None,
-                view: None,
-                tip: Vec::new(),
-            });
+            return Err(std::io::Error::other("system history names an unreadable batch").into());
         };
 
         if let Some(undo) = sort.undo {
@@ -1705,10 +1848,21 @@ impl Autobee {
             let mut system = self.system.lock().await;
             system.list_pending_promotions().await?
         };
+        // the first 32 requests this standing can serve, then `fetchApproval`
+        let standing = standing as u64;
+        let servable = list.into_iter().filter_map(|(key, weight)| {
+            let amount = standing.min(weight);
+            (amount > 0).then_some((key, amount))
+        });
         let mut approvals = Vec::new();
-        for (key, weight) in list.into_iter().take(32) {
-            let amount = (standing.max(0) as u64).min(weight);
-            if amount == 0 {
+        for (key, amount) in servable.take(32) {
+            if self
+                .approved_pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .is_some_and(|approved| *approved >= amount)
+            {
                 continue;
             }
             let system = self.system.lock().await;
@@ -1728,13 +1882,27 @@ impl Autobee {
                 weight: amount,
             });
         }
-        Ok((!approvals.is_empty()).then_some(approvals))
+        if approvals.is_empty() {
+            return Ok(None);
+        }
+        let mut approved = self
+            .approved_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for approval in &approvals {
+            approved.insert(approval.key, approval.weight);
+        }
+        Ok(Some(approvals))
     }
 
     /// `wakeup({ key, length })`.
     pub async fn wakeup(&self, key: Key, length: u64) -> Result<()> {
         if std::env::var_os("AUTOBEE_DEBUG").is_some() {
             eprintln!("[wakeup {:?}] {:?}:{length}", &self.id[..6], &key[..3]);
+        }
+        // `writers._add` adds nothing once teardown or an interrupt started
+        if self.is_interrupting() {
+            return Ok(());
         }
         let trusted = self.is_local_trusted().await;
         self.writers
@@ -1758,21 +1926,16 @@ impl Autobee {
         self.writable_flag.load(Ordering::Acquire)
     }
 
-    /// Releases the view, then the writers, then the system and the wakeup.
+    /// `_teardown`: closes the sessions first, so a drain parked on a read
+    /// nobody serves fails and ends, then waits for the driver and releases
+    /// the view, the writers and the system.
     pub async fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
         self.interrupting.store(true, Ordering::Release);
-        self.bump.wake.notify_waiters();
+        self.bump.wake.notify_one();
 
-        // let an in-flight drain notice `closed` before its sessions go away
-        {
-            let _guard = self.drain_lock.lock().await;
-        }
-        if let Some(driver) = self.driver.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            driver.abort();
-        }
         if let Some(group) = self
             .group_updates
             .lock()
@@ -1793,20 +1956,29 @@ impl Autobee {
             self.lock_seeds().ff_searching = false;
         }
 
+        self.reads.close().await;
+        self.system_store.close().await;
+        self.view_store.close().await;
+        self.bootstrap.close();
+        self.wakeup.close();
+
+        let driver = self.driver.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(driver) = driver {
+            let _ = driver.await;
+        }
+
         let view_result = self.view.close(self.handlers.as_ref()).await;
         self.writers.lock().await.close();
         self.system.lock().await.bee.close().await;
-        self.wakeup.close();
-        self.system_store.close().await;
-        self.bootstrap.close();
         let working_result = self.working_view.close(self.handlers.as_ref()).await;
-        self.view_store.close().await;
+        self.bump.close();
         view_result?;
         working_result?;
         Ok(())
     }
 }
 
+/// The one task that drains, for callers and hints alike.
 fn spawn_driver(auto: &Arc<Autobee>) {
     let weak = Arc::downgrade(auto);
     let bump = Arc::clone(&auto.bump);
@@ -1816,27 +1988,8 @@ fn spawn_driver(auto: &Arc<Autobee>) {
             let Some(auto) = weak.upgrade() else {
                 return;
             };
-            if auto.closed.load(Ordering::Acquire) {
+            if !auto.drive().await {
                 return;
-            }
-            // a panic in the drain must not kill the session silently: the
-            // inner task reports it as a JoinError and the base closes
-            let drain = {
-                let drain_auto = Arc::clone(&auto);
-                tokio::spawn(async move { drain_auto.drain_loop().await })
-            };
-            match drain.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    auto.on_error(&err);
-                    auto.close_soon();
-                    return;
-                }
-                Err(err) => {
-                    eprintln!("autobee: drain task failed: {err}");
-                    auto.close_soon();
-                    return;
-                }
             }
         }
     });
@@ -1844,14 +1997,52 @@ fn spawn_driver(auto: &Arc<Autobee>) {
 }
 
 impl Autobee {
-    /// Records the drain failure. INTERRUPT is not fatal (`interrupting` stays
-    /// set); callers close on every other error.
+    /// Drains until no bump is left; false once the driver must stop.
+    async fn drive(self: &Arc<Self>) -> bool {
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return false;
+            }
+            let upto = self.bump.requested();
+            // after an interrupt nothing drains again, as the reference's
+            // `_draining` stays settled
+            if self.is_interrupting() || self.bump.take() == 0 {
+                self.bump.finish(upto, None);
+                return true;
+            }
+            // a panic in the drain must not kill the session silently: the
+            // inner task reports it as a JoinError and the base closes
+            let drain = {
+                let auto = Arc::clone(self);
+                tokio::spawn(async move { auto.drain_inner().await })
+            };
+            let (err, interrupted) = match drain.await {
+                Ok(Ok(())) => continue,
+                Ok(Err(err)) => (err, self.is_interrupting()),
+                Err(err) => (Error::from(format!("drain task failed: {err}")), false),
+            };
+            // `_onError`: a closing session ignores what its teardown breaks
+            if self.closed.load(Ordering::Acquire) {
+                return false;
+            }
+            self.on_error(&err);
+            self.bump.finish(self.bump.requested(), Some(&err));
+            if interrupted {
+                return true;
+            }
+            self.close_soon();
+            return false;
+        }
+    }
+
+    /// `_onError`: records the drain failure. INTERRUPT keeps the session
+    /// open with `interrupting` set; every other error closes it.
     fn on_error(&self, err: &Error) {
         let message = err.to_string();
         *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
     }
 
-    /// Closes from a spawned task: `close()` aborts the driver, so the driver
+    /// Closes from a spawned task: `close()` awaits the driver, so the driver
     /// must not await it itself.
     fn close_soon(&self) {
         let Some(auto) = self
@@ -1866,6 +2057,24 @@ impl Autobee {
             let _ = auto.close().await;
         });
     }
+}
+
+/// Clears `ff_searching` when the search task ends, panics or is aborted.
+struct SearchingGuard(Arc<Autobee>);
+
+impl Drop for SearchingGuard {
+    fn drop(&mut self) {
+        self.0.lock_seeds().ff_searching = false;
+    }
+}
+
+/// `Date.now()`: the reference stamps the drain and bounds forward drift on
+/// the wall clock, not on `handlers.now`, so a custom clock stays comparable
+/// with the group log and with honest peers' timestamps.
+fn wall_clock() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 fn head_of(head: Option<BeeHead>) -> Option<crate::types::Head> {
@@ -2040,8 +2249,16 @@ impl Autobee {
             let writers = self.writers.lock().await;
             if let Some(writer) = writers.get(key)
                 && length > writer.core.length()
-                && let Some(mut node) = writer.pending_node(length)
             {
+                // `getLocalBatch`: a local block past the core is a pending node
+                // or nothing; no peer can serve a block only we can write
+                let Some(mut node) = writer.pending_node(length) else {
+                    return Err(std::io::Error::other(format!(
+                        "No local nodes: looking for {length}, found {}",
+                        writer.core.length()
+                    ))
+                    .into());
+                };
                 node.weight = weight;
                 return Ok(Some(node));
             }
@@ -2063,7 +2280,7 @@ impl Autobee {
         if length == 0 {
             return Ok(None);
         }
-        let core = self.store.get(GetOptions::key(*key)).await?;
+        let core = self.reads.get(GetOptions::key(*key)).await?;
         let options = hypercore::GetOptions {
             wait,
             timeout: (timeout > 0).then(|| std::time::Duration::from_millis(timeout)),
@@ -2169,20 +2386,7 @@ impl crate::apply_calls::Auto for Autobee {
 impl Host for Autobee {
     fn open_core(&self, key: Key) -> crate::fast_forward::BoxFuture<'_, Option<Arc<Session>>> {
         Box::pin(async move {
-            self.store
-                .get(GetOptions::key(key))
-                .await
-                .ok()
-                .map(Arc::new)
-        })
-    }
-
-    fn open_legacy_core(
-        &self,
-        key: Key,
-    ) -> crate::fast_forward::BoxFuture<'_, Option<Arc<Session>>> {
-        Box::pin(async move {
-            self.store
+            self.reads
                 .get(GetOptions::key(key))
                 .await
                 .ok()
@@ -2229,8 +2433,6 @@ impl Host for Autobee {
             } else {
                 timeout
             });
-            // hyperbee has no per-checkout read options, so the open itself is
-            // bounded here; later reads are bounded by the callers
             let bee = tokio::time::timeout(
                 timeout,
                 self.view.bee().checkout(BeeHead {
@@ -2241,6 +2443,12 @@ impl Host for Autobee {
             .await
             .ok()?
             .ok()?;
+            // JS `openView(head, { timeout })`: every read the app's hooks make
+            // on this checkout is bounded by the same timeout
+            bee.set_default_read_options(hypercore::GetOptions {
+                timeout: Some(timeout),
+                ..Default::default()
+            });
             Some(self.handlers.open(bee))
         })
     }
@@ -2277,7 +2485,7 @@ impl Host for Autobee {
             // core that needs reindexing is legacy storage, which is refused
             // here; an unfetchable manifest is `unknown` (JS passes
             // `{ unknown: true }`) and fails the candidate closed
-            let Ok(core) = self.store.get(GetOptions::key(key)).await else {
+            let Ok(core) = self.reads.get(GetOptions::key(key)).await else {
                 return true;
             };
             let mut manifest = core.manifest();
@@ -2348,16 +2556,6 @@ impl Host for Autobee {
         _timeout: u64,
     ) -> crate::fast_forward::BoxFuture<'_, u64> {
         Box::pin(async move { core.length() })
-    }
-
-    fn read_legacy_system_info(
-        &self,
-        _core: Arc<Session>,
-        _length: u64,
-        _timeout: u64,
-    ) -> crate::fast_forward::BoxFuture<'_, Option<crate::types::Info>> {
-        // legacy autobase storage is refused at boot; nothing to decode here
-        Box::pin(async { None })
     }
 }
 
@@ -2491,6 +2689,10 @@ mod tests {
         clock: AtomicU64,
         fail_once: AtomicBool,
         panic_once: AtomicBool,
+        interrupt_once: AtomicBool,
+        /// `is_trusted` panics once for this key; every asked key is recorded.
+        panic_trust: StdMutex<Option<Key>>,
+        asked: StdMutex<Vec<Key>>,
         bootstrap_weight: u64,
         fast_forward: bool,
     }
@@ -2501,6 +2703,9 @@ mod tests {
                 clock: AtomicU64::new(clock),
                 fail_once: AtomicBool::new(false),
                 panic_once: AtomicBool::new(false),
+                interrupt_once: AtomicBool::new(false),
+                panic_trust: StdMutex::new(None),
+                asked: StdMutex::new(Vec::new()),
                 bootstrap_weight: 2,
                 fast_forward: false,
             })
@@ -2512,11 +2717,15 @@ mod tests {
             &'a self,
             _nodes: &'a [Node],
             _view: &'a Bee,
-            _host: &'a ApplyCalls<'a, 'b>,
+            host: &'a ApplyCalls<'a, 'b>,
         ) -> BoxFuture<'a, crate::apply_calls::Result<()>> {
             Box::pin(async move {
                 if self.panic_once.swap(false, Ordering::AcqRel) {
                     panic!("handler panic");
+                }
+                if self.interrupt_once.swap(false, Ordering::AcqRel) {
+                    host.interrupt(Some("stop"));
+                    return Ok(());
                 }
                 if self.fail_once.swap(false, Ordering::AcqRel) {
                     return Err(crate::apply_calls::Error::from(
@@ -2543,6 +2752,23 @@ mod tests {
 
         fn bootstrap_weight(&self) -> u64 {
             self.bootstrap_weight
+        }
+
+        fn is_trusted<'a>(
+            &'a self,
+            key: &'a Key,
+            _reference: Option<&'a Bee>,
+        ) -> BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.asked.lock().unwrap().push(*key);
+                let mut panic_trust = self.panic_trust.lock().unwrap();
+                if *panic_trust == Some(*key) {
+                    *panic_trust = None;
+                    drop(panic_trust);
+                    panic!("trust hook panic");
+                }
+                true
+            })
         }
     }
 
@@ -2843,5 +3069,265 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "a panicking drain closes the base");
+    }
+
+    fn raw_oplog(
+        timestamp: u64,
+        batch: Option<crate::types::BatchCoords>,
+        approvals: Option<Vec<crate::encoding::Approval>>,
+        value: &'static [u8],
+    ) -> crate::encoding::OplogMessageV4 {
+        crate::encoding::OplogMessageV4 {
+            timestamp,
+            links: Vec::new(),
+            batch,
+            views: None,
+            trusted: None,
+            witness: None,
+            approvals,
+            optimistic: true,
+            value: Some(Bytes::from_static(value)),
+            hash: None,
+            weight_hint: None,
+            drift: None,
+        }
+    }
+
+    /// Writes one oplog block to a fresh writer core of `db`'s store.
+    async fn append_raw(db: &Autobee, name: &str, oplog: crate::encoding::OplogMessageV4) -> Key {
+        let core = db.store.get(GetOptions::name(name)).await.unwrap();
+        let mut encoded = crate::encoding::Oplog::V4(oplog);
+        core.append(&[crate::encoding::encode_oplog(&mut encoded)])
+            .await
+            .unwrap();
+        let key = *core.key();
+        core.close();
+        key
+    }
+
+    /// A block at seq 0 that claims `start: 1` sends topo's reorder walk to
+    /// seq -1: the drain re-read the same empty batch forever. It must freeze
+    /// its writer at ingestion, and a later block that sorts before it must
+    /// still drain.
+    #[tokio::test]
+    async fn a_block_with_lying_batch_coordinates_freezes_its_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [38; 32]).unwrap();
+        let db = open(&store, TestHandler::new(1_000)).await;
+        db.append(vec![Bytes::from_static(b"first")], false)
+            .await
+            .expect("leave genesis");
+
+        let lying = crate::types::BatchCoords { start: 1, end: 0 };
+        let hostile = append_raw(&db, "hostile", raw_oplog(2_000, Some(lying), None, b"bad")).await;
+        // an older block sorts before the hostile one, so a reorder walks past it
+        let honest = append_raw(&db, "honest", raw_oplog(1_500, None, None, b"good")).await;
+        db.wakeup(hostile, 1).await.expect("wakeup hostile");
+        tokio::time::timeout(std::time::Duration::from_secs(10), db.wakeup(honest, 1))
+            .await
+            .expect("the drain does not loop")
+            .expect("wakeup honest");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            db.append(vec![Bytes::from_static(b"after")], false),
+        )
+        .await
+        .expect("a later append drains")
+        .expect("append");
+
+        let system = db.system.lock().await;
+        assert!(
+            system.get(&hostile, false, None).await.unwrap().is_none(),
+            "the lying block is never applied"
+        );
+        assert!(
+            system
+                .get(&honest, false, None)
+                .await
+                .unwrap()
+                .is_some_and(|writer| writer.length == 1),
+            "the honest block is applied"
+        );
+        drop(system);
+        db.close().await.unwrap();
+    }
+
+    /// The reference applies a block whose approval weight is 2^21 (the
+    /// promotions digest only fails past 2^24 units); freezing it forked the
+    /// Rust peers' views from the JS peers'.
+    #[tokio::test]
+    async fn a_large_approval_weight_is_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [39; 32]).unwrap();
+        let db = open(&store, TestHandler::new(1_000)).await;
+        db.append(vec![Bytes::from_static(b"first")], false)
+            .await
+            .expect("leave genesis");
+
+        let approvals = vec![crate::encoding::Approval {
+            key: [5; 32],
+            weight: 1 << 21,
+        }];
+        let approver = append_raw(
+            &db,
+            "approver",
+            raw_oplog(2_000, None, Some(approvals), b"approve"),
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), db.wakeup(approver, 1))
+            .await
+            .expect("wakeup drains")
+            .expect("wakeup");
+
+        let system = db.system.lock().await;
+        assert!(
+            system.heads.iter().any(|head| head.key == approver),
+            "the heads advance to the approving block"
+        );
+        drop(system);
+        db.close().await.unwrap();
+    }
+
+    /// `_teardown` closes the cores before it awaits the drain. A drain
+    /// parked on a block no peer has (here a landing's system info) must fail
+    /// and let `close` return instead of holding it forever.
+    #[tokio::test]
+    async fn close_returns_while_a_drain_waits_on_a_missing_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [40; 32]).unwrap();
+        let db = open(&store, TestHandler::new(1_000)).await;
+        db.lock_seeds().fast_forward_to = Some(Landing {
+            head: crate::types::Head {
+                key: Some([0x77; 32]),
+                length: 3,
+            },
+        });
+        let drains = db.stats.drains.load(Ordering::Acquire);
+        db.bump_soon();
+        for _ in 0..200 {
+            if db.stats.drains.load(Ordering::Acquire) > drains {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            db.fast_forward_to().is_some(),
+            "the drain is parked on the landing"
+        );
+
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), db.close()).await;
+        assert!(closed.is_ok(), "close does not wait on the parked read");
+        assert!(
+            db.last_error().is_none(),
+            "teardown errors are not drain errors"
+        );
+    }
+
+    /// `_onError` keeps the session open on INTERRUPT whichever task drains;
+    /// the driver used to close it.
+    #[tokio::test]
+    async fn an_interrupt_keeps_the_base_open_on_the_driver_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [41; 32]).unwrap();
+        let handler = TestHandler::new(1_000);
+        handler.interrupt_once.store(true, Ordering::Release);
+        let db = open(&store, Arc::clone(&handler)).await;
+        let writable = db.writers.lock().await.writable;
+        let mut oplog = raw_oplog(1, None, None, b"stop");
+        oplog.optimistic = false;
+        db.writers.lock().await.append_local(oplog, writable);
+        db.bump_soon();
+
+        let interrupted = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while db.last_error().is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(interrupted.is_ok(), "the driver ran the interrupted drain");
+        // a close the driver scheduled would land within this
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !db.closed.load(Ordering::Acquire),
+            "an interrupt is not fatal"
+        );
+        assert_eq!(db.interrupted().as_deref(), Some("stop"));
+        assert!(
+            db.last_error()
+                .is_some_and(|error| error.contains("Apply interrupted"))
+        );
+        db.update().await.expect("later drains end at once");
+        db.close().await.unwrap();
+    }
+
+    /// `_ffSearching` is cleared in a `finally`. A search task that panics
+    /// left `ff_searching` set, so no fast-forward ever ran again.
+    #[tokio::test]
+    async fn a_failed_fast_forward_search_does_not_block_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Corestore::open_with_primary_key(dir.path(), [42; 32]).unwrap();
+        let mut handler = TestHandler::new(1_000);
+        Arc::get_mut(&mut handler).unwrap().fast_forward = true;
+        let db = open(&store, Arc::clone(&handler)).await;
+
+        let mut oplog = raw_oplog(1, None, None, b"head");
+        oplog.views = Some(Views {
+            flushes: 1,
+            system: crate::encoding::ExternalBatch {
+                key: [3; 32],
+                start: 0,
+                length: 1,
+            },
+            view: None,
+        });
+        let candidate = append_raw(&db, "candidate", oplog).await;
+        *handler.panic_trust.lock().unwrap() = Some(candidate);
+        let asked = || {
+            handler
+                .asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| **key == candidate)
+                .count()
+        };
+        let hint = Link {
+            key: candidate,
+            length: 1,
+        };
+        let search_done = || async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !db
+                    .ff_search
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .is_none_or(JoinHandle::is_finished)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the search ends");
+        };
+
+        db.queue_fast_forward(std::slice::from_ref(&hint));
+        search_done().await;
+        assert_eq!(asked(), 1, "the first search reached the hook and panicked");
+        assert!(
+            !db.lock_seeds().ff_searching,
+            "the failed search is cleared"
+        );
+
+        db.queue_fast_forward(std::slice::from_ref(&hint));
+        let second = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while asked() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(second.is_ok(), "a second search runs");
+        db.close().await.unwrap();
     }
 }

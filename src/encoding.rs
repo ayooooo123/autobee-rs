@@ -210,6 +210,7 @@ pub enum SystemInfoValue {
     Legacy(LegacySystemInfo),
     V2(InfoV2),
     V3(SystemInfoV3),
+    V4(SystemInfoV3),
 }
 
 /// `infoLegacyMap`.
@@ -244,6 +245,7 @@ pub fn decode_system_info(buf: impl Into<Bytes>) -> Result<SystemInfoValue> {
         }),
         SystemInfo::V2(info) => SystemInfoValue::V2(info),
         SystemInfo::V3(info) => SystemInfoValue::V3(info),
+        SystemInfo::V4(info) => SystemInfoValue::V4(info),
     })
 }
 
@@ -586,5 +588,25 @@ mod tests {
                 hash: Some([9; 8]),
             })
         );
+    }
+
+    #[test]
+    fn oplog_drift_above_js_safe_integer_is_rejected() {
+        let mut oplog = Oplog::V4(OplogMessageV4 {
+            timestamp: 0,
+            links: Vec::new(),
+            batch: None,
+            views: None,
+            trusted: None,
+            witness: None,
+            approvals: None,
+            optimistic: false,
+            value: None,
+            hash: None,
+            weight_hint: None,
+            drift: Some(1 << 53),
+        });
+        let encoded = encode_oplog(&mut oplog);
+        assert!(decode_oplog(encoded).is_err());
     }
 }

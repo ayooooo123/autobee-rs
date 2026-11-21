@@ -655,6 +655,23 @@ async fn js_owner_and_rust_writer_converge_restart_and_swap() {
         poke(&mut js, &rust, js_local).await;
         sleep(Duration::from_millis(50)).await;
     }
+    // Ask for the owner's next block before it exists, so the `want` for its segment is out
+    // before the owner appends. npm then announces the append with `range` ahead of `sync`,
+    // and that `range` is the Rust side's only notice of the block (hypercore-rs keeps it for
+    // the `sync`). Without this step the order of the first `want` decides which path runs.
+    let ahead = rust.store.get(GetOptions::key(js_local)).await.unwrap();
+    let next_block = ahead.core().clone();
+    tokio::spawn({
+        let next_block = next_block.clone();
+        async move {
+            let _session = ahead;
+            let _ = next_block.get(1, Default::default()).await;
+        }
+    });
+    while next_block.pending_requests().await == 0 {
+        sleep(Duration::from_millis(10)).await;
+    }
+    sleep(Duration::from_millis(200)).await;
     js.append(&json!({ "type": "put", "key": "js/1", "value": "from-js" }))
         .await;
     rust.append(&json!({ "type": "put", "key": "rust/1", "value": "from-rust" }))

@@ -1,8 +1,8 @@
 //! `autobee/lib/trusted.js`: the fast-forward trust cache. A truthy answer is
-//! cached until the key is forgotten (a writer removed by apply) or `clear`
-//! runs (a system undo); concurrent probes of the same key share one handler
-//! call, and an answer still in flight when its key is forgotten resolves
-//! untrusted for every caller and is not cached.
+//! cached until `clear` runs (a system undo); Rust also forgets a removed
+//! writer. Concurrent probes of the same key share one handler call, and an
+//! answer still in flight when its key is forgotten resolves untrusted for
+//! every caller and is not cached.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -531,6 +531,18 @@ fn system_info_json(v: &SystemInfoValue) -> Value {
             "pending": m.pending.as_ref().map_or(Value::Null, |list| json!(list)),
             "hash": m.hash.as_ref().map_or(Value::Null, |h| json!(hx(h))),
         }),
+        SystemInfoValue::V4(m) => json!({
+            "version": 4,
+            "timestamp": m.timestamp,
+            "flushes": m.flushes,
+            "view": link_json(&m.view),
+            "heads": m.heads.iter().map(link_json).collect::<Vec<_>>(),
+            "indexers": m.indexers.as_ref().map_or(Value::Null, |list| {
+                Value::Array(list.iter().map(link_json).collect())
+            }),
+            "pending": m.pending.as_ref().map_or(Value::Null, |list| json!(list)),
+            "hash": m.hash.as_ref().map_or(Value::Null, |h| json!(hx(h))),
+        }),
     }
 }
 

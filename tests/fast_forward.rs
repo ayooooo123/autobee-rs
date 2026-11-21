@@ -1,7 +1,6 @@
 //! Replays `fixtures/traces/fast-forward-landing.json` through the
 //! `fast_forward` module and exercises the search rules the trace cannot
-//! produce: untrusted candidates, a revoked owner, the legacy crawl bounds and
-//! cancellation.
+//! produce: untrusted candidates, a revoked owner, and cancellation.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,7 +14,7 @@ use autobee::encoding::{self, Batch, GrantHint, Link, SystemInfoValue, TrustedHe
 use autobee::fast_forward::{BoxFuture, FastForward, Host, Landing, MIN_FF_GAP, Options};
 use autobee::system::SystemBee;
 use autobee::trusted::{Genesis, TrustedPeers};
-use autobee::types::{EMPTY_HEAD, Head, Info, Key, Node};
+use autobee::types::{Head, Info, Key, Node};
 use autobee::updates::Changes;
 use corestore::{Corestore, GetOptions as StoreGetOptions};
 use hyperbee::{Bee, Head as BeeHead, RangeOptions};
@@ -277,10 +276,6 @@ impl Host for ReplayHost {
         })
     }
 
-    fn open_legacy_core(&self, key: Key) -> BoxFuture<'_, Option<Arc<Session>>> {
-        self.open_core(key)
-    }
-
     fn read_oplog(
         &self,
         core: Arc<Session>,
@@ -412,15 +407,6 @@ impl Host for ReplayHost {
             }
             core.length()
         })
-    }
-
-    fn read_legacy_system_info(
-        &self,
-        _core: Arc<Session>,
-        _length: u64,
-        _timeout: u64,
-    ) -> BoxFuture<'_, Option<Info>> {
-        Box::pin(async { None })
     }
 }
 
@@ -803,8 +789,6 @@ struct StubHost {
     /// The key each `open_core` call was made for, most recent last.
     opened: Mutex<Vec<Key>>,
     oplogs: Mutex<HashMap<(Key, u64), Node>>,
-    legacy: Mutex<HashMap<Key, Info>>,
-    legacy_calls: Mutex<Vec<Key>>,
     trust: Mutex<HashMap<Key, bool>>,
     trusted_peers: Option<Arc<TrustedPeers>>,
     reference: Mutex<Option<Bee>>,
@@ -818,13 +802,6 @@ impl Host for StubHost {
     fn open_core(&self, key: Key) -> BoxFuture<'_, Option<Arc<Session>>> {
         Box::pin(async move {
             self.opened.lock().unwrap().push(key);
-            self.core.clone()
-        })
-    }
-
-    fn open_legacy_core(&self, key: Key) -> BoxFuture<'_, Option<Arc<Session>>> {
-        Box::pin(async move {
-            self.legacy_calls.lock().unwrap().push(key);
             self.core.clone()
         })
     }
@@ -904,18 +881,6 @@ impl Host for StubHost {
     fn core_length(&self, core: Arc<Session>, _timeout: u64) -> BoxFuture<'_, u64> {
         Box::pin(async move { self.length.max(core.length()) })
     }
-
-    fn read_legacy_system_info(
-        &self,
-        _core: Arc<Session>,
-        _length: u64,
-        _timeout: u64,
-    ) -> BoxFuture<'_, Option<Info>> {
-        Box::pin(async move {
-            let key = self.legacy_calls.lock().unwrap().last().copied();
-            key.and_then(|key| self.legacy.lock().unwrap().get(&key).cloned())
-        })
-    }
 }
 
 fn stub_node(key: Key, length: u64, flushes: u64, system: Key) -> Node {
@@ -945,22 +910,6 @@ fn stub_node(key: Key, length: u64, flushes: u64, system: Key) -> Node {
         hash: None,
         weight_hint: 0,
         drift: 0,
-    }
-}
-
-fn legacy_info(indexer: Key) -> Info {
-    Info {
-        version: 1,
-        timestamp: 0,
-        flushes: 0,
-        view: EMPTY_HEAD,
-        heads: Vec::new(),
-        indexers: Some(vec![Head {
-            key: Some(indexer),
-            length: 1,
-        }]),
-        pending: None,
-        hash: None,
     }
 }
 
@@ -1071,97 +1020,6 @@ async fn a_revoked_owner_is_not_trusted() {
     assert_eq!(trust.decided(), vec![(candidate, false)]);
 }
 
-#[tokio::test]
-async fn the_legacy_crawl_stops_at_five_hops() {
-    let (_dir, core, system) = scratch().await;
-    let host = StubHost {
-        core: Some(core),
-        length: 5,
-        ..Default::default()
-    };
-    // every system's indexer reports the next system as its flushed successor
-    let systems: Vec<Key> = (0..=6u8).map(|i| [0x10 + i; 32]).collect();
-    for index in 0..6usize {
-        let indexer = [0x40 + index as u8; 32];
-        host.legacy
-            .lock()
-            .unwrap()
-            .insert(systems[index], legacy_info(indexer));
-        host.oplogs.lock().unwrap().insert(
-            (indexer, 5),
-            Node {
-                version: 2,
-                ..stub_node(indexer, 5, 1, systems[index + 1])
-            },
-        );
-    }
-
-    let mut ff = FastForward::new(
-        system,
-        Head {
-            key: Some(systems[0]),
-            length: 5,
-        },
-        Options::default(),
-    );
-    let (head, autobee) = ff.resolve_legacy(&host).await.unwrap();
-    assert!(autobee.is_none());
-    assert_eq!(
-        head.key,
-        Some(systems[5]),
-        "the crawl stops after five hops"
-    );
-    assert_eq!(
-        *host.legacy_calls.lock().unwrap(),
-        systems[..6].to_vec(),
-        "six systems are opened, the sixth successor is not followed"
-    );
-}
-
-#[tokio::test]
-async fn the_legacy_crawl_stops_on_a_cycle() {
-    let (_dir, core, system) = scratch().await;
-    let host = StubHost {
-        core: Some(core),
-        length: 5,
-        ..Default::default()
-    };
-    let a: Key = [0x21; 32];
-    let b: Key = [0x22; 32];
-    for (peer, indexer) in [(a, [0x31; 32]), (b, [0x32; 32])] {
-        host.legacy
-            .lock()
-            .unwrap()
-            .insert(peer, legacy_info(indexer));
-    }
-    host.oplogs.lock().unwrap().insert(
-        ([0x31; 32], 5),
-        Node {
-            version: 2,
-            ..stub_node([0x31; 32], 5, 1, b)
-        },
-    );
-    host.oplogs.lock().unwrap().insert(
-        ([0x32; 32], 5),
-        Node {
-            version: 2,
-            ..stub_node([0x32; 32], 5, 1, a)
-        },
-    );
-
-    let mut ff = FastForward::new(
-        system,
-        Head {
-            key: Some(a),
-            length: 5,
-        },
-        Options::default(),
-    );
-    let (head, _) = ff.resolve_legacy(&host).await.unwrap();
-    assert_eq!(head.key, Some(b), "the cycle ends on the last unseen head");
-    assert_eq!(*host.legacy_calls.lock().unwrap(), vec![a, b]);
-}
-
 // --- cancellation ----------------------------------------------------------
 
 struct CancelHost {
@@ -1179,10 +1037,6 @@ impl Host for CancelHost {
                 .ok()
                 .map(Arc::new)
         })
-    }
-
-    fn open_legacy_core(&self, key: Key) -> BoxFuture<'_, Option<Arc<Session>>> {
-        self.open_core(key)
     }
 
     fn read_oplog(
@@ -1264,15 +1118,6 @@ impl Host for CancelHost {
 
     fn core_length(&self, core: Arc<Session>, _timeout: u64) -> BoxFuture<'_, u64> {
         Box::pin(async move { core.length() })
-    }
-
-    fn read_legacy_system_info(
-        &self,
-        _core: Arc<Session>,
-        _length: u64,
-        _timeout: u64,
-    ) -> BoxFuture<'_, Option<Info>> {
-        Box::pin(async { None })
     }
 }
 

@@ -2,6 +2,7 @@
 //! active writers, collecting the hints peers announce, and coupling writer
 //! cores so peers that miss them are told about them.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hypercore::Core;
@@ -44,6 +45,8 @@ struct State {
     coupler: Option<Arc<CoreCoupler>>,
     /// Pending hints, in first-seen order, longest length per key.
     hints: Vec<Link>,
+    /// Where each key sits in `hints` (JS keeps a `Map`).
+    hint_index: HashMap<[u8; 32], usize>,
     streams: Vec<Mux>,
 }
 
@@ -72,7 +75,9 @@ impl AutobeeWakeup {
 
     /// Takes the hints accumulated since the last flush.
     pub fn flush(&self) -> Vec<Link> {
-        std::mem::take(&mut self.shared.lock().hints)
+        let mut st = self.shared.lock();
+        st.hint_index.clear();
+        std::mem::take(&mut st.hints)
     }
 
     /// Registers a stream for wakeup and for core coupling.
@@ -226,8 +231,9 @@ impl Shared {
         {
             let mut st = self.lock();
             for link in hints {
-                match st.hints.iter_mut().find(|h| h.key == link.key) {
-                    Some(prev) => {
+                match st.hint_index.get(&link.key).copied() {
+                    Some(index) => {
+                        let prev = &mut st.hints[index];
                         if link.length == UNKNOWN_LENGTH
                             || prev.length < link.length
                             || prev.length == UNKNOWN_LENGTH
@@ -235,7 +241,11 @@ impl Shared {
                             *prev = link.clone();
                         }
                     }
-                    None => st.hints.push(link.clone()),
+                    None => {
+                        let index = st.hints.len();
+                        st.hint_index.insert(link.key, index);
+                        st.hints.push(link.clone());
+                    }
                 }
             }
         }
